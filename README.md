@@ -13,7 +13,7 @@ cp .env.example .env
 # 编辑 .env 填入你的 API Key
 
 # 运行
-python main.py --pdf examples/your_paper.pdf
+python main.py examples/your_paper.pdf --pretty
 ```
 
 ## Architecture

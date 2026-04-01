@@ -65,7 +65,7 @@ def main() -> None:
     print("\nCore Contributions:", file=sys.stderr)
     for i, c in enumerate(summary.core_contributions, 1):
         print(f"  {i}. {c}", file=sys.stderr)
-    print(f"\nNovelty : {summary.method_highlights}", file=sys.stderr)
+    print(f"\nMethod  : {summary.method_highlights}", file=sys.stderr)
     print(f"\nResults : {summary.experiment_highlights}", file=sys.stderr)
     print(f"\nLimits  : {summary.limitations_and_future_work}", file=sys.stderr)
     print("=" * 60, file=sys.stderr)

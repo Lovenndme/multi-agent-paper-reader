@@ -6,7 +6,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
-from utils.llm import get_llm
+from utils.llm import get_llm, invoke_with_retry
 
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "summary.txt"
 
@@ -27,8 +27,5 @@ def run_summary_agent(
         .replace("{critic_output}", critic_output.model_dump_json(indent=2))
     )
 
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(SummaryOutput)
-
-    result = structured_llm.invoke([HumanMessage(content=prompt)])
-    return result
+    structured_llm = get_llm().with_structured_output(SummaryOutput)
+    return invoke_with_retry(structured_llm, [HumanMessage(content=prompt)])
