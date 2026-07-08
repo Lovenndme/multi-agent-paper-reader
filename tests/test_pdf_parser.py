@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from core.pdf_parser import (
     ParsedPaper,
     Section,
+    _looks_like_font_header,
     _matches_header_pattern,
     _normalize_title,
 )
@@ -45,6 +46,19 @@ class TestHeaderPattern(unittest.TestCase):
         self.assertFalse(_matches_header_pattern(""))
         # Long lines should not match
         self.assertFalse(_matches_header_pattern("A" * 61))
+
+
+class TestFontHeaderHeuristic(unittest.TestCase):
+    def test_accepts_short_real_section_titles(self):
+        self.assertTrue(_looks_like_font_header("Model"))
+        self.assertTrue(_looks_like_font_header("EEG Matching"))
+        self.assertTrue(_looks_like_font_header("2.1 EEG Acquisition"))
+
+    def test_rejects_title_fragments_and_equations(self):
+        self.assertFalse(_looks_like_font_header("sciences"))
+        self.assertFalse(_looks_like_font_header("(ESML): A Deep Learning Framework on"))
+        self.assertFalse(_looks_like_font_header("="))
+        self.assertFalse(_looks_like_font_header("mn) �→∑"))
 
 
 class TestParsedPaperSectionRouting(unittest.TestCase):
@@ -110,7 +124,7 @@ class TestCLIArgContract(unittest.TestCase):
                 import importlib
                 import main as main_mod
                 # Check the source uses positional, not --pdf
-                src = Path(main_mod.__file__).read_text()
+                src = Path(main_mod.__file__).read_text(encoding="utf-8")
                 self.assertIn('parser.add_argument("pdf"', src)
                 self.assertNotIn('add_argument("--pdf"', src)
 

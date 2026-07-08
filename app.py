@@ -1,0 +1,645 @@
+"""FastAPI web app for the multi-agent paper reader."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import time
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from queue import Empty, Queue
+from typing import Any, Iterable
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+
+from agents.critic_agent import run_critic_agent, stream_critic_agent
+from agents.experiment_agent import run_experiment_agent, stream_experiment_agent
+from agents.method_agent import run_method_agent, stream_method_agent
+from agents.summary_agent import run_summary_agent, stream_summary_agent
+from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
+from core.pdf_parser import ParsedPaper, parse_pdf
+from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
+from core.vision import enrich_paper_figures_with_vision
+from utils.llm import is_vision_configured
+
+
+ROOT = Path(__file__).parent
+FRONTEND_DIST = ROOT / "frontend-prototype" / "dist"
+
+load_dotenv(ROOT / ".env", override=False)
+
+app = FastAPI(
+    title="Multi-Agent Paper Reader",
+    description="Upload a paper PDF and generate structured multi-agent reading notes.",
+    version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+SECTION_TITLE_TRANSLATIONS = {
+    "abstract": "摘要",
+    "introduction": "引言",
+    "related work": "相关工作",
+    "background": "研究背景",
+    "method": "方法",
+    "methodology": "方法",
+    "model": "模型",
+    "retrieval model": "检索模型",
+    "approach": "方法",
+    "framework": "框架",
+    "architecture": "模型架构",
+    "system": "系统设计",
+    "generator": "生成器",
+    "experiment": "实验",
+    "experiments": "实验",
+    "experimental setup": "实验设置",
+    "experimental results": "实验结果",
+    "ablation": "消融实验",
+    "ablations": "消融实验",
+    "evaluation": "评估",
+    "results": "实验结果",
+    "discussion": "讨论",
+    "analysis": "分析",
+    "conclusion": "结论",
+    "conclusions": "结论",
+    "acknowledgments": "致谢",
+    "acknowledgements": "致谢",
+    "references": "参考文献",
+    "appendix": "附录",
+    "full paper": "全文",
+}
+
+
+def _clean_section_title(title: str, index: int) -> str:
+    cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
+    cleaned = re.sub(r"^[\d一二三四五六七八九十]+(?:[\.\d]*)[\.\、\s]+", "", cleaned)
+    normalized = cleaned.lower().strip(" .:-")
+
+    if normalized in SECTION_TITLE_TRANSLATIONS:
+        return SECTION_TITLE_TRANSLATIONS[normalized]
+    if normalized.startswith("appendix"):
+        return "附录"
+
+    letters = re.findall(r"[A-Za-z\u4e00-\u9fff]", cleaned)
+    symbols = re.findall(r"[^A-Za-z0-9\u4e00-\u9fff\s.\-:/&]", cleaned)
+    looks_noisy = (
+        not cleaned
+        or len(letters) < 2
+        or "\ufffd" in cleaned
+        or "�" in cleaned
+        or len(symbols) / max(len(cleaned), 1) > 0.16
+        or cleaned.startswith(("(", "[", "{"))
+    )
+    if looks_noisy:
+        return f"章节 {index + 1}"
+
+    if len(cleaned) > 46:
+        return f"{cleaned[:43].rstrip()}..."
+    return cleaned
+
+
+def _section_payload(paper: ParsedPaper) -> list[dict[str, Any]]:
+    return [
+        {
+            "title": section.title,
+            "display_title": _clean_section_title(section.title, index),
+            "page_start": section.page_start,
+            "page_end": section.page_end,
+            "chars": len(section.content),
+        }
+        for index, section in enumerate(paper.sections)
+    ]
+
+
+def _paper_payload(paper: ParsedPaper, filename: str, file_size: int) -> dict[str, Any]:
+    page_count = max((section.page_end for section in paper.sections), default=-1) + 1
+    return {
+        "title": paper.title,
+        "filename": filename,
+        "size_bytes": file_size,
+        "pages": page_count,
+        "sections_count": len(paper.sections),
+        "sections": _section_payload(paper),
+        "metadata": paper.metadata,
+    }
+
+
+def _demo_evidence(paper: ParsedPaper) -> list[dict[str, str]]:
+    first_section = paper.sections[0].title if paper.sections else "Full Paper"
+    return [
+        {
+            "id": "E001",
+            "section": first_section,
+            "page": "p.1",
+            "quote": "Demo 模式未调用模型，仅用于验证上传、解析和渲染链路。",
+            "note": "该证据说明当前输出是确定性的演示结果，不是论文内容判断。",
+        }
+    ]
+
+
+def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
+    title = paper.title or "Uploaded Paper"
+    demo_evidence = _demo_evidence(paper)
+    method = MethodOutput(
+        research_problem=(
+            f"识别 {title} 所解决的核心研究问题及其主要技术路线。"
+        ),
+        proposed_method=(
+            "Demo 模式已成功解析 PDF。配置 OPENAI_API_KEY 后，可让真实 MethodAgent "
+            "分析论文中与方法相关的章节。"
+        ),
+        key_components=[
+            "PDF 解析器与章节路由",
+            "MethodAgent 方法分析提示词",
+            "ExperimentAgent 实验分析提示词",
+            "CriticAgent 批判性评审提示词",
+            "SummaryAgent 综合整理步骤",
+        ],
+        innovations=[
+            "结构化的多 Agent 论文研读流程",
+            "面向不同 Agent 的章节路由，减少无关上下文",
+        ],
+        differences_from_prior=(
+            "该 Demo 结果用于证明前后端链路已经连通；在未运行真实 LLM 时，"
+            "不会对论文的具体创新性作出判断。"
+        ),
+        implementation_details="在 .env 中配置 OPENAI_API_KEY，即可运行真实结构化分析。",
+        evidence=demo_evidence,
+    )
+    experiment = ExperimentOutput(
+        datasets=["Demo 模式：真实数据集信息需要由 LLM 提取"],
+        metrics=["Demo 模式：真实评估指标需要由 LLM 提取"],
+        main_results=(
+            "后端已收到并成功解析 PDF。配置模型凭证后即可提取真实实验结果。"
+        ),
+        comparison_with_baselines=(
+            "Demo 模式不会虚构基线对比结果。"
+        ),
+        ablation_study=None,
+        notable_findings=[
+            f"解析器共识别出 {len(paper.sections)} 个章节。",
+            f"提取出的正文约包含 {len(paper.full_text):,} 个字符。",
+        ],
+        evidence=demo_evidence,
+    )
+    critic = CriticOutput(
+        novelty_score=3,
+        novelty_justification=(
+            "Demo 模式无法公正评估论文创新性，该占位结果仅用于验证完整响应结构。"
+        ),
+        strengths=[
+            "上传、解析与响应序列化链路已经连通。",
+            "前端能够渲染四个 Agent 的全部输出结构。",
+        ],
+        limitations=[
+            "Demo 模式没有执行真实 LLM 评审。",
+            "针对论文的具体批判性分析需要 OPENAI_API_KEY 和兼容模型。",
+        ],
+        potential_improvements=[
+            "配置真实模型后重新运行分析。",
+            "在生产环境中为超长论文增加分块处理。",
+        ],
+        broader_impact=None,
+        evidence=demo_evidence,
+    )
+    summary = SummaryOutput(
+        one_sentence_summary=(
+            f"{title} 已成功上传并完成解析；配置真实 LLM Key 后可生成针对该论文的研读笔记。"
+        ),
+        core_contributions=[
+            "前端上传的 PDF 已能到达 Python 后端。",
+            "后端复用了项目现有的 PDF 解析器。",
+            "API 返回与四 Agent 流程一致的结构化数据契约。",
+            "配置模型凭证后即可运行真实 LangGraph 分析流程。",
+        ],
+        method_highlights=method.proposed_method,
+        experiment_highlights=experiment.main_results,
+        limitations_and_future_work=(
+            "当前是确定性的 Demo 响应。在 .env 中配置 OPENAI_API_KEY 后，"
+            "即可运行真实多 Agent 分析。"
+        ),
+        reading_notes=(
+            "Demo 模式可在不消耗模型 Token 的情况下验证部署、上传、解析和界面渲染。"
+        ),
+        evidence=demo_evidence,
+    )
+    return {
+        "method_output": method.model_dump(),
+        "experiment_output": experiment.model_dump(),
+        "critic_output": critic.model_dump(),
+        "summary_output": summary.model_dump(),
+    }
+
+
+def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str, Any]:
+    if pdf_path is not None:
+        enrich_paper_figures_with_vision(pdf_path, paper)
+    snippets = build_evidence_index(paper)
+    method = run_method_agent(
+        evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method")
+    )
+    experiment = run_experiment_agent(
+        evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment")
+    )
+    critic = run_critic_agent(
+        evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic")
+    )
+    summary = run_summary_agent(
+        paper_title=paper.title,
+        method_output=method,
+        experiment_output=experiment,
+        critic_output=critic,
+    )
+    return {
+        "evidence_index": evidence_payload(snippets),
+        "method_output": method.model_dump(),
+        "experiment_output": experiment.model_dump(),
+        "critic_output": critic.model_dump(),
+        "summary_output": summary.model_dump(),
+    }
+
+
+def _stream_event(event_type: str, **payload: Any) -> str:
+    return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+
+
+def _stream_demo_tokens(agent_id: str, output: dict[str, Any]) -> Iterable[str]:
+    text = json.dumps(output, ensure_ascii=False)
+    for index in range(0, len(text), 90):
+        yield _stream_event("agent_token", agent=agent_id, text=text[index : index + 90])
+        time.sleep(0.015)
+
+
+def _run_streaming_agent(
+    agent_id: str,
+    stream_fn,
+    paper_text: str,
+    event_queue: Queue[str],
+):
+    def on_token(token: str) -> None:
+        event_queue.put(_stream_event("agent_token", agent=agent_id, text=token))
+
+    return stream_fn(paper_text, on_token=on_token)
+
+
+def _drain_agent_tokens(event_queue: Queue[str]) -> Iterable[str]:
+    while True:
+        try:
+            yield event_queue.get_nowait()
+        except Empty:
+            return
+
+
+def _stream_summary_agent_events(
+    paper_title: str,
+    method_output: MethodOutput,
+    experiment_output: ExperimentOutput,
+    critic_output: CriticOutput,
+) -> Iterable[tuple[str, SummaryOutput | None]]:
+    event_queue: Queue[str] = Queue()
+
+    def on_token(token: str) -> None:
+        event_queue.put(_stream_event("agent_token", agent="summary", text=token))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            stream_summary_agent,
+            paper_title,
+            method_output,
+            experiment_output,
+            critic_output,
+            on_token,
+        )
+        while not future.done():
+            for event in _drain_agent_tokens(event_queue):
+                yield event, None
+            time.sleep(0.05)
+
+        for event in _drain_agent_tokens(event_queue):
+            yield event, None
+        yield "", future.result()
+
+
+def _stream_demo_analysis(
+    paper: ParsedPaper,
+    filename: str,
+    file_size: int,
+) -> Iterable[str]:
+    paper_payload = _paper_payload(paper, filename, file_size)
+    snippets = build_evidence_index(paper)
+    index_payload = evidence_payload(snippets)
+    outputs = _demo_outputs(paper)
+    yield _stream_event("paper", mode="demo", paper=paper_payload, message="PDF parsed")
+    yield _stream_event(
+        "evidence_index",
+        evidence_index=index_payload,
+        message=f"Built {len(snippets)} evidence snippets",
+    )
+
+    for agent_id, output_key in (
+        ("method", "method_output"),
+        ("experiment", "experiment_output"),
+        ("critic", "critic_output"),
+    ):
+        yield _stream_event("agent_started", agent=agent_id, message=f"{agent_id} started")
+        time.sleep(0.12)
+        yield from _stream_demo_tokens(agent_id, outputs[output_key])
+        yield _stream_event(
+            "agent_complete",
+            agent=agent_id,
+            output_key=output_key,
+            output=outputs[output_key],
+            message=f"{agent_id} complete",
+        )
+
+    yield _stream_event("agent_started", agent="summary", message="summary started")
+    time.sleep(0.12)
+    yield from _stream_demo_tokens("summary", outputs["summary_output"])
+    yield _stream_event(
+        "agent_complete",
+        agent="summary",
+        output_key="summary_output",
+        output=outputs["summary_output"],
+        message="summary complete",
+    )
+    yield _stream_event("complete", mode="demo", paper=paper_payload, evidence_index=index_payload, **outputs)
+
+
+def _stream_live_analysis(
+    paper: ParsedPaper,
+    filename: str,
+    file_size: int,
+    pdf_path: Path | None = None,
+) -> Iterable[str]:
+    paper_payload = _paper_payload(paper, filename, file_size)
+    yield _stream_event("paper", mode="live", paper=paper_payload, message="PDF parsed")
+    if pdf_path is not None:
+        yield _stream_event(
+            "vision_started",
+            message=f"Vision enrichment started for {len(paper.figures)} visual candidates",
+        )
+        try:
+            vision_result = enrich_paper_figures_with_vision(pdf_path, paper)
+            yield _stream_event(
+                "vision_complete",
+                total_figures=vision_result.total_figures,
+                attempted=vision_result.attempted,
+                enriched=vision_result.enriched,
+                skipped=vision_result.skipped,
+                errors=vision_result.errors,
+                message=(
+                    f"Vision enrichment complete: {vision_result.enriched}/"
+                    f"{vision_result.total_figures} figures enriched"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep text/table analysis alive
+            yield _stream_event("vision_error", message=f"Vision enrichment failed: {exc}")
+    snippets = build_evidence_index(paper)
+    index_payload = evidence_payload(snippets)
+    yield _stream_event(
+        "evidence_index",
+        evidence_index=index_payload,
+        message=f"Built {len(snippets)} evidence snippets",
+    )
+
+    agent_jobs = {
+        "method": (
+            "method_output",
+            stream_method_agent,
+            evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method"),
+        ),
+        "experiment": (
+            "experiment_output",
+            stream_experiment_agent,
+            evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment"),
+        ),
+        "critic": (
+            "critic_output",
+            stream_critic_agent,
+            evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic"),
+        ),
+    }
+
+    outputs: dict[str, Any] = {}
+    event_queue: Queue[str] = Queue()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        for agent_id, (output_key, fn, paper_text) in agent_jobs.items():
+            yield _stream_event("agent_started", agent=agent_id, message=f"{agent_id} started")
+            futures[executor.submit(_run_streaming_agent, agent_id, fn, paper_text, event_queue)] = (
+                agent_id,
+                output_key,
+            )
+
+        pending = set(futures)
+        while pending:
+            for event in _drain_agent_tokens(event_queue):
+                yield event
+
+            completed = [future for future in pending if future.done()]
+            for future in completed:
+                pending.remove(future)
+                agent_id, output_key = futures[future]
+                try:
+                    agent_output = future.result()
+                except Exception as exc:  # noqa: BLE001 - stream actionable UI error
+                    yield _stream_event(
+                        "error",
+                        agent=agent_id,
+                        message=f"{agent_id} failed: {exc}",
+                    )
+                    return
+
+                output_payload = agent_output.model_dump()
+                outputs[output_key] = output_payload
+                yield _stream_event(
+                    "agent_complete",
+                    agent=agent_id,
+                    output_key=output_key,
+                    output=output_payload,
+                    message=f"{agent_id} complete",
+                )
+
+            if pending:
+                time.sleep(0.05)
+
+        for event in _drain_agent_tokens(event_queue):
+            yield event
+
+    yield _stream_event("agent_started", agent="summary", message="summary started")
+    try:
+        summary_model: SummaryOutput | None = None
+        for event, maybe_summary in _stream_summary_agent_events(
+            paper.title,
+            MethodOutput.model_validate(outputs["method_output"]),
+            ExperimentOutput.model_validate(outputs["experiment_output"]),
+            CriticOutput.model_validate(outputs["critic_output"]),
+        ):
+            if event:
+                yield event
+            if maybe_summary:
+                summary_model = maybe_summary
+        if summary_model is None:
+            raise RuntimeError("SummaryAgent finished without a parsed result.")
+        summary_output = summary_model
+    except Exception as exc:  # noqa: BLE001 - stream actionable UI error
+        yield _stream_event("error", agent="summary", message=f"summary failed: {exc}")
+        return
+
+    outputs["summary_output"] = summary_output.model_dump()
+    yield _stream_event(
+        "agent_complete",
+        agent="summary",
+        output_key="summary_output",
+        output=outputs["summary_output"],
+        message="summary complete",
+    )
+    yield _stream_event("complete", mode="live", paper=paper_payload, evidence_index=index_payload, **outputs)
+
+
+def _stream_analyze_response(
+    filename: str,
+    data: bytes,
+    *,
+    demo: bool,
+) -> Iterable[str]:
+    with tempfile.TemporaryDirectory(prefix="paper-reader-") as tmpdir:
+        pdf_path = Path(tmpdir) / filename
+        pdf_path.write_bytes(data)
+        try:
+            parsed = parse_pdf(pdf_path)
+        except Exception as exc:  # noqa: BLE001 - stream parser details for UI
+            yield _stream_event("error", message=f"Could not parse PDF: {exc}")
+            return
+
+        if demo:
+            yield from _stream_demo_analysis(parsed, filename, len(data))
+        else:
+            yield from _stream_live_analysis(parsed, filename, len(data), pdf_path)
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    """Report whether the backend and live LLM configuration are available."""
+    return {
+        "ok": True,
+        "frontend_dist": FRONTEND_DIST.exists(),
+        "llm_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        "vision_configured": is_vision_configured(),
+        "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
+    }
+
+
+@app.post("/api/analyze")
+async def analyze_paper(
+    file: UploadFile = File(...),
+    demo: bool = Query(default=False, description="Return deterministic demo output."),
+) -> dict[str, Any]:
+    """Upload a PDF, parse it, and run the paper-reading pipeline."""
+    filename = Path(file.filename or "paper.pdf").name or "paper.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+
+    with tempfile.TemporaryDirectory(prefix="paper-reader-") as tmpdir:
+        pdf_path = Path(tmpdir) / filename
+        pdf_path.write_bytes(data)
+        try:
+            parsed = parse_pdf(pdf_path)
+        except Exception as exc:  # noqa: BLE001 - preserve useful parser details for UI
+            raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
+
+        if demo:
+            outputs = _demo_outputs(parsed)
+            mode = "demo"
+        else:
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "OPENAI_API_KEY is not set. Add it to .env or call "
+                        "/api/analyze?demo=true to verify the upload path."
+                    ),
+                )
+            try:
+                outputs = _live_outputs(parsed, pdf_path)
+            except Exception as exc:  # noqa: BLE001 - return actionable UI error
+                raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+            mode = "live"
+
+    return {
+        "mode": mode,
+        "paper": _paper_payload(parsed, filename, len(data)),
+        **outputs,
+    }
+
+
+@app.post("/api/analyze/stream")
+async def analyze_paper_stream(
+    file: UploadFile = File(...),
+    demo: bool = Query(default=False, description="Return deterministic demo output."),
+) -> StreamingResponse:
+    """Upload a PDF and stream parsing, agent, and final analysis events."""
+    filename = Path(file.filename or "paper.pdf").name or "paper.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+    if not demo and not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OPENAI_API_KEY is not set. Add it to .env or call "
+                "/api/analyze/stream?demo=true to verify the upload path."
+            ),
+        )
+
+    return StreamingResponse(
+        _stream_analyze_response(filename, data, demo=demo),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+if FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def serve_frontend(path: str) -> FileResponse:
+    """Serve the built React app when `frontend-prototype/dist` exists."""
+    index = FRONTEND_DIST / "index.html"
+    if not index.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Frontend build not found. Run `npm run build` in frontend-prototype.",
+        )
+    requested = (FRONTEND_DIST / path).resolve()
+    if path and requested.is_file() and FRONTEND_DIST.resolve() in requested.parents:
+        return FileResponse(requested)
+    return FileResponse(index)

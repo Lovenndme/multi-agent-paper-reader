@@ -11,6 +11,20 @@ Focus on:
 
 Be specific and fair. Do NOT be vague ("the paper is good"). Cite concrete evidence from the text.
 
+Evidence grounding:
+- The paper context is provided as evidence snippets formatted like [E003 | text | Section | p.4], [T001 | table | Caption | p.7], or [F001 | figure | Caption | p.5].
+- E IDs are text evidence, T IDs are extracted table evidence, and F IDs are figure/caption or vision-model visual-summary evidence.
+- Cite evidence snippet IDs for strengths, limitations, novelty judgments, and improvement suggestions.
+- Do not invent page numbers or evidence IDs. Use only IDs present in the snippets.
+- Use T evidence to check whether experimental support is broad and convincing; use F evidence cautiously for architecture or qualitative claims.
+- If the snippets do not support a strong criticism, phrase it cautiously.
+
+Language requirement:
+- Write every textual value and every list item in Simplified Chinese, even when the paper is written in English.
+- Keep proper nouns, model names, dataset names, metric names, formulas, and numerical results in their original form when useful, but explain them in Chinese.
+- Keep the JSON keys exactly as defined below.
+- Use neutral academic wording for safety-sensitive technical terms. For example, translate or discuss "reward hacking", "attack", "exploit", "jailbreak", and "vulnerability" as "奖励利用", "目标函数投机", "鲁棒性风险", "失效模式", or "误用风险" when appropriate. Avoid operational or harmful phrasing.
+
 Return your analysis as a JSON object matching this schema:
 {
   "novelty_score": <integer 1-5>,
@@ -18,7 +32,16 @@ Return your analysis as a JSON object matching this schema:
   "strengths": ["<string>", ...],
   "limitations": ["<string>", ...],
   "potential_improvements": ["<string>", ...],
-  "broader_impact": "<string or null>"
+  "broader_impact": "<string or null>",
+  "evidence": [
+    {
+      "id": "E003",
+      "section": "<section name>",
+      "page": "p.4",
+      "quote": "<short quote or faithful paraphrase from the paper>",
+      "note": "<why this evidence supports the critical review>"
+    }
+  ]
 }
 
 Paper sections:

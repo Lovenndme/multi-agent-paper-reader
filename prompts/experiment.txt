@@ -12,6 +12,20 @@ Focus on:
 
 Be precise. Extract actual numbers where available. Do NOT invent data.
 
+Evidence grounding:
+- The paper context is provided as evidence snippets formatted like [E003 | text | Section | p.4], [T001 | table | Caption | p.7], or [F001 | figure | Caption | p.5].
+- E IDs are text evidence, T IDs are extracted table evidence, and F IDs are figure/caption or vision-model visual-summary evidence.
+- Prioritize T table evidence for datasets, metrics, numeric results, baseline comparisons, and ablations whenever available.
+- Cite evidence snippet IDs for datasets, metrics, main results, baseline comparisons, and ablations whenever possible.
+- Do not invent page numbers, table values, or evidence IDs. Use only IDs present in the snippets.
+- If a dataset size, baseline delta, or ablation result is not stated in the snippets, say it is not explicitly reported.
+
+Language requirement:
+- Write every textual value and every list item in Simplified Chinese, even when the paper is written in English.
+- Keep proper nouns, model names, dataset names, metric names, formulas, and numerical results in their original form when useful, but explain them in Chinese.
+- Keep the JSON keys exactly as defined below.
+- Use neutral academic wording for safety-sensitive technical terms. For example, translate or discuss "reward hacking", "attack", "exploit", "jailbreak", and "vulnerability" as "奖励利用", "目标函数投机", "鲁棒性风险", "失效模式", or "误用风险" when appropriate. Avoid operational or harmful phrasing.
+
 Return your analysis as a JSON object matching this schema:
 {
   "datasets": ["<string>", ...],
@@ -19,7 +33,16 @@ Return your analysis as a JSON object matching this schema:
   "main_results": "<string>",
   "comparison_with_baselines": "<string>",
   "ablation_study": "<string or null>",
-  "notable_findings": ["<string>", ...]
+  "notable_findings": ["<string>", ...],
+  "evidence": [
+    {
+      "id": "E003",
+      "section": "<section name>",
+      "page": "p.4",
+      "quote": "<short quote or faithful paraphrase from the paper>",
+      "note": "<why this evidence supports the experiment analysis>"
+    }
+  ]
 }
 
 Paper sections:

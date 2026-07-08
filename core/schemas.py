@@ -4,6 +4,16 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class EvidenceItem(BaseModel):
+    """Traceable evidence from the original paper."""
+
+    id: str = Field(description="Evidence snippet ID, for example E003, T001, or F002")
+    section: str = Field(description="Paper section where the evidence appears")
+    page: str = Field(description="Page label or page range, for example p.3 or pp.4-5")
+    quote: str = Field(description="Short original-paper quote or faithful paraphrase")
+    note: str = Field(description="How this evidence supports the analysis")
+
+
 class MethodOutput(BaseModel):
     """MethodAgent output: research methods and technical contributions."""
 
@@ -16,6 +26,10 @@ class MethodOutput(BaseModel):
     )
     implementation_details: Optional[str] = Field(
         default=None, description="Notable implementation specifics"
+    )
+    evidence: List[EvidenceItem] = Field(
+        default_factory=list,
+        description="Key evidence snippets supporting method claims",
     )
 
 
@@ -32,6 +46,10 @@ class ExperimentOutput(BaseModel):
         default=None, description="Key findings from ablation studies, if any"
     )
     notable_findings: List[str] = Field(description="Noteworthy experimental findings")
+    evidence: List[EvidenceItem] = Field(
+        default_factory=list,
+        description="Key evidence snippets supporting experiment claims",
+    )
 
 
 class CriticOutput(BaseModel):
@@ -44,6 +62,10 @@ class CriticOutput(BaseModel):
     potential_improvements: List[str] = Field(description="Suggested directions for improvement")
     broader_impact: Optional[str] = Field(
         default=None, description="Potential broader impact or societal implications"
+    )
+    evidence: List[EvidenceItem] = Field(
+        default_factory=list,
+        description="Key evidence snippets supporting critical review claims",
     )
 
 
@@ -65,4 +87,8 @@ class SummaryOutput(BaseModel):
     )
     reading_notes: Optional[str] = Field(
         default=None, description="Additional reading notes or personal observations"
+    )
+    evidence: List[EvidenceItem] = Field(
+        default_factory=list,
+        description="Most important evidence carried into the final note",
     )

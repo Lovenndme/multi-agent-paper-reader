@@ -70,6 +70,15 @@ _ZH_PATTERNS = [
 _ALL_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _EN_PATTERNS] + \
                 [re.compile(p) for p in _ZH_PATTERNS]
 
+_FONT_HEADER_KEYWORDS = {
+    "abstract", "introduction", "related work", "background", "method",
+    "methodology", "model", "approach", "framework", "architecture",
+    "experiment", "experiments", "evaluation", "result", "results",
+    "discussion", "analysis", "conclusion", "limitations", "references",
+    "dataset", "datasets", "matching", "acquisition", "preprocessing",
+    "classification", "training", "algorithm",
+}
+
 
 @dataclass
 class Section:
@@ -80,10 +89,28 @@ class Section:
 
 
 @dataclass
+class TableBlock:
+    page: int
+    rows: List[List[str]]
+    caption: str = ""
+
+
+@dataclass
+class FigureBlock:
+    page: int
+    caption: str = ""
+    image_index: int = 0
+    bbox: Optional[Tuple[float, float, float, float]] = None
+    visual_summary: str = ""
+
+
+@dataclass
 class ParsedPaper:
     title: str
     full_text: str
     sections: List[Section] = field(default_factory=list)
+    tables: List[TableBlock] = field(default_factory=list)
+    figures: List[FigureBlock] = field(default_factory=list)
     metadata: Dict[str, str] = field(default_factory=dict)
 
     def get_sections_for_agent(self, agent_type: str) -> str:
@@ -128,6 +155,43 @@ def _matches_header_pattern(line: str) -> bool:
     for pat in _ALL_PATTERNS:
         if pat.match(stripped.lower() if pat.flags & re.IGNORECASE else stripped):
             return True
+    return False
+
+
+def _looks_like_font_header(line: str) -> bool:
+    """Reject title fragments, equations, and symbol-heavy text from font heuristics."""
+    stripped = re.sub(r"\s+", " ", line).strip()
+    if not stripped or len(stripped) > 72:
+        return False
+    if stripped.startswith(("(", "[", "{")):
+        return False
+    if "\ufffd" in stripped or "�" in stripped:
+        return False
+    if re.fullmatch(r"[\W_]+", stripped):
+        return False
+
+    letters = re.findall(r"[A-Za-z\u4e00-\u9fff]", stripped)
+    if len(letters) < 2:
+        return False
+
+    symbols = re.findall(r"[^A-Za-z0-9\u4e00-\u9fff\s.\-:/&]", stripped)
+    if len(symbols) / max(len(stripped), 1) > 0.16:
+        return False
+
+    if _matches_header_pattern(stripped):
+        return True
+
+    normalized = _normalize_title(stripped)
+    if any(keyword in normalized for keyword in _FONT_HEADER_KEYWORDS):
+        return True
+
+    if re.search(r"[\u4e00-\u9fff]", stripped) and len(stripped) <= 24:
+        return True
+
+    words = re.findall(r"[A-Za-z][A-Za-z0-9-]*", stripped)
+    if 1 <= len(words) <= 5:
+        return all(word.isupper() or word[:1].isupper() for word in words)
+
     return False
 
 
@@ -177,7 +241,7 @@ def _split_by_fontsize(
         is_header = (
             size >= header_size
             and stripped
-            and len(stripped) <= 60
+            and _looks_like_font_header(stripped)
             and not stripped[-1] in ".。,，;；:："  # headers don't end with punctuation
         )
         if is_header:
@@ -242,6 +306,143 @@ def _split_by_regex(pages_text: List[Tuple[int, str]]) -> List[Section]:
     return sections
 
 
+def _split_by_toc(toc: List[List[object]], pages_text: List[Tuple[int, str]]) -> List[Section]:
+    """Split by embedded PDF outline/bookmarks when present."""
+    if not toc or not pages_text:
+        return []
+
+    page_count = len(pages_text)
+    candidates: List[Tuple[int, str, int]] = []
+    seen: set[Tuple[str, int]] = set()
+    for row in toc:
+        if len(row) < 3:
+            continue
+        level, title, page_number = row[:3]
+        if not isinstance(title, str):
+            continue
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title or len(title) > 100:
+            continue
+        try:
+            page_index = int(page_number) - 1
+            level_num = int(level)
+        except (TypeError, ValueError):
+            continue
+        if page_index < 0 or page_index >= page_count or level_num > 3:
+            continue
+        key = (title.lower(), page_index)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((page_index, title, level_num))
+
+    if len(candidates) < 2:
+        return []
+
+    candidates.sort(key=lambda item: item[0])
+    sections: List[Section] = []
+    for index, (page_start, title, _) in enumerate(candidates):
+        next_page = candidates[index + 1][0] if index + 1 < len(candidates) else page_count
+        page_end = max(page_start, next_page - 1)
+        page_end = min(page_end, page_count - 1)
+        content = "\n".join(text for page, text in pages_text if page_start <= page <= page_end).strip()
+        if content:
+            sections.append(Section(title=title, content=content, page_start=page_start, page_end=page_end))
+    return sections
+
+
+def _extract_caption_lines(page_text: str, kind: str) -> List[str]:
+    if kind == "table":
+        pattern = re.compile(r"^\s*(?:Table|TABLE|Tab\.|表)\s*[\dIVXivx一二三四五六七八九十]+[.:：\s-]*(.+)?")
+    else:
+        pattern = re.compile(r"^\s*(?:Figure|FIGURE|Fig\.|图)\s*[\dIVXivx一二三四五六七八九十]+[.:：\s-]*(.+)?")
+
+    captions: List[str] = []
+    lines = [line.strip() for line in page_text.splitlines()]
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        if not pattern.match(line):
+            continue
+        pieces = [line]
+        if index + 1 < len(lines):
+            next_line = lines[index + 1].strip()
+            if next_line and len(next_line) <= 180 and not _matches_header_pattern(next_line):
+                pieces.append(next_line)
+        captions.append(" ".join(pieces))
+    return captions
+
+
+def _clean_table_rows(rows: List[List[object]]) -> List[List[str]]:
+    cleaned: List[List[str]] = []
+    for row in rows:
+        cells = []
+        for cell in row:
+            value = "" if cell is None else str(cell)
+            value = re.sub(r"\s+", " ", value).strip()
+            cells.append(value)
+        if any(cells):
+            cleaned.append(cells)
+    return cleaned
+
+
+def _extract_tables_and_figures(
+    doc: fitz.Document,
+    pages_text: List[Tuple[int, str]],
+) -> Tuple[List[TableBlock], List[FigureBlock]]:
+    tables: List[TableBlock] = []
+    figures: List[FigureBlock] = []
+    text_by_page = {page: text for page, text in pages_text}
+
+    for page_num, page in enumerate(doc):
+        page_text = text_by_page.get(page_num, "")
+        table_captions = _extract_caption_lines(page_text, "table")
+        figure_captions = _extract_caption_lines(page_text, "figure")
+
+        try:
+            found_tables = page.find_tables().tables
+        except Exception:  # noqa: BLE001 - table detection is best-effort
+            found_tables = []
+
+        for index, table in enumerate(found_tables):
+            try:
+                rows = _clean_table_rows(table.extract())
+            except Exception:  # noqa: BLE001 - skip malformed table objects
+                continue
+            if len(rows) < 2:
+                continue
+            caption = table_captions[index] if index < len(table_captions) else ""
+            tables.append(TableBlock(page=page_num, rows=rows, caption=caption))
+
+        if not found_tables:
+            for caption in table_captions:
+                tables.append(TableBlock(page=page_num, rows=[], caption=caption))
+
+        try:
+            image_infos = page.get_image_info(xrefs=True)
+        except Exception:  # noqa: BLE001 - image metadata is best-effort
+            image_infos = []
+
+        page_area = max(page.rect.width * page.rect.height, 1)
+        large_images = []
+        for info in image_infos:
+            bbox = info.get("bbox")
+            if not bbox:
+                continue
+            x0, y0, x1, y1 = bbox
+            area = max((x1 - x0) * (y1 - y0), 0)
+            if area / page_area >= 0.015:
+                large_images.append(tuple(float(v) for v in bbox))
+
+        max_items = max(len(figure_captions), len(large_images))
+        for index in range(max_items):
+            caption = figure_captions[index] if index < len(figure_captions) else ""
+            bbox = large_images[index] if index < len(large_images) else None
+            figures.append(FigureBlock(page=page_num, caption=caption, image_index=index + 1, bbox=bbox))
+
+    return tables, figures
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -262,6 +463,7 @@ def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
 
     meta = doc.metadata or {}
     paper_title = meta.get("title", "").strip() or pdf_path.stem
+    toc = doc.get_toc(simple=True)
 
     # Plain text per page (for regex fallback and full_text)
     pages_text: List[Tuple[int, str]] = []
@@ -269,19 +471,24 @@ def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
         pages_text.append((page_num, page.get_text("text")))
 
     full_text = "\n".join(t for _, t in pages_text)
+    tables, figures = _extract_tables_and_figures(doc, pages_text)
 
-    # --- Strategy 1: font-size heuristic ---
+    # --- Strategy 1: embedded outline / bookmarks ---
+    sections = _split_by_toc(toc, pages_text)
+
+    # --- Strategy 2: font-size heuristic ---
     rows = _extract_blocks_with_fontsize(doc)
     doc.close()
 
-    body_size = _detect_body_fontsize(rows)
-    sections = _split_by_fontsize(rows, body_size)
+    if len(sections) < 3:
+        body_size = _detect_body_fontsize(rows)
+        sections = _split_by_fontsize(rows, body_size)
 
-    # --- Strategy 2: regex fallback ---
+    # --- Strategy 3: regex fallback ---
     if len(sections) < 3:
         sections = _split_by_regex(pages_text)
 
-    # --- Strategy 3: single-block fallback ---
+    # --- Strategy 4: single-block fallback ---
     if len(sections) < 2:
         sections = [Section(
             title="Full Paper",
@@ -294,5 +501,7 @@ def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
         title=paper_title,
         full_text=full_text,
         sections=sections,
+        tables=tables,
+        figures=figures,
         metadata={k: str(v) for k, v in meta.items() if v},
     )

@@ -8,3 +8,10 @@ dist/
 build/
 .DS_Store
 examples/*.pdf
+*.log
+frontend-prototype/node_modules/
+frontend-prototype/dist/
+frontend-prototype/output/
+frontend-prototype/.npm-cache/
+test-paper*.pdf
+vision_ab_outputs/

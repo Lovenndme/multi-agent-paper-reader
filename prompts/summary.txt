@@ -17,6 +17,18 @@ Guidelines:
 
 Synthesize, do not just copy-paste. Maintain technical accuracy.
 
+Evidence grounding:
+- Upstream agent outputs include evidence arrays with snippet IDs, page labels, and short quotes/paraphrases.
+- Carry the most important evidence into the final "evidence" array.
+- Do not introduce new evidence IDs that were not present in upstream outputs.
+- If a claim lacks evidence, phrase it cautiously or omit it from the final note.
+
+Language requirement:
+- Write the complete reading note in Simplified Chinese, even when the source paper and upstream analyses are in English.
+- Keep proper nouns, model names, dataset names, metric names, formulas, and numerical results in their original form when useful, but explain them in Chinese.
+- Keep the JSON keys exactly as defined below.
+- Use neutral academic wording for safety-sensitive technical terms. For example, translate or discuss "reward hacking", "attack", "exploit", "jailbreak", and "vulnerability" as "奖励利用", "目标函数投机", "鲁棒性风险", "失效模式", or "误用风险" when appropriate. Avoid operational or harmful phrasing.
+
 Return your analysis as a JSON object matching this schema:
 {
   "one_sentence_summary": "<string>",
@@ -24,7 +36,16 @@ Return your analysis as a JSON object matching this schema:
   "method_highlights": "<string>",
   "experiment_highlights": "<string>",
   "limitations_and_future_work": "<string>",
-  "reading_notes": "<string or null>"
+  "reading_notes": "<string or null>",
+  "evidence": [
+    {
+      "id": "E003",
+      "section": "<section name>",
+      "page": "p.4",
+      "quote": "<short quote or faithful paraphrase from the paper>",
+      "note": "<why this evidence matters for the final note>"
+    }
+  ]
 }
 
 ---

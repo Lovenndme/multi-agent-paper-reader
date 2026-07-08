@@ -1,32 +1,87 @@
 # Multi-Agent Paper Reader
 
-基于 LangGraph 的多 Agent 协作论文研读助手。上传学术论文 PDF，系统通过四个专职 Agent（方法解析 / 实验分析 / 批判性评审 / 总结编排）协作，输出结构化的论文研读笔记。
+Multi-Agent Paper Reader is an evidence-grounded research paper reading assistant. Upload a PDF, parse its sections, build a traceable evidence index from text, extracted tables, and vision-model figure summaries, run specialist agents for method analysis, experiment analysis, and critique, then synthesize a polished structured reading note.
 
-## Quick Start
+## Web App
+
+The repository includes a full-stack web app:
+
+- Backend: `app.py` with FastAPI
+- Frontend: `frontend-prototype/` with React + Vite
+- API: `POST /api/analyze` accepts a PDF upload and returns parsed paper metadata plus all agent outputs
+- Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
+- Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
+
+Run it locally:
 
 ```bash
-# 安装依赖
+# Python backend dependencies
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# Frontend dependencies and production build
+cd frontend-prototype
+npm install
+npm run build
+cd ..
+
+# Start the full-stack app
+.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000/
+```
+
+For real LLM analysis, copy `.env.example` to `.env` and set `OPENAI_API_KEY`. The UI also has a Demo mode in Model Settings so upload, PDF parsing, API wiring, and result rendering can be verified without an LLM key.
+
+For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and `VISION_MODEL_NAME=glm-5v-turbo` or another OpenAI-compatible vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
+
+## CLI Quick Start
+
+```bash
 pip install -r requirements.txt
+copy .env.example .env
+# Edit .env and set OPENAI_API_KEY
 
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入你的 API Key
-
-# 运行
 python main.py examples/your_paper.pdf --pretty
 ```
 
 ## Architecture
 
-```
-PDF → Parser → [MethodAgent | ExperimentAgent | CriticAgent] → SummaryAgent → 结构化笔记
+```text
+PDF
+-> core.pdf_parser.parse_pdf
+-> core.evidence.build_evidence_index
+-> MethodAgent + ExperimentAgent + CriticAgent read relevant text/table/figure evidence snippets
+-> SummaryAgent synthesizes structured notes with carried-forward evidence
+-> structured reading note
 ```
 
-详细架构说明见 [CLAUDE.md](./CLAUDE.md)。
+The live stream emits these event types:
+
+- `paper`
+- `evidence_index`
+- `vision_started`
+- `vision_complete`
+- `vision_error`
+- `agent_started`
+- `agent_token`
+- `agent_complete`
+- `complete`
+- `error`
+
+`agent_token` is the raw model generation stream. The frontend shows it as a live preview, then renders the parsed Pydantic output once the JSON object is complete.
+
+See [CLAUDE.md](./CLAUDE.md) for the original architecture notes.
 
 ## Tech Stack
 
-- LangGraph (Agent orchestration)
-- PyMuPDF (PDF parsing)
-- Pydantic v2 (Output schema validation)
-- Streamlit (Optional frontend)
+- LangGraph for agent orchestration
+- PyMuPDF for PDF parsing, outline-based section detection, table extraction, and rendered figure regions
+- Pydantic v2 for output schema validation
+- Evidence snippets for page/section-grounded claims (`E` text, `T` table, `F` vision figure summary)
+- FastAPI for the backend API and static hosting
+- React + Vite for the frontend workbench

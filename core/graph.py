@@ -1,6 +1,6 @@
 """LangGraph workflow: fan-out to three parallel agents, fan-in to summary agent."""
 
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -8,6 +8,7 @@ from agents.critic_agent import run_critic_agent
 from agents.experiment_agent import run_experiment_agent
 from agents.method_agent import run_method_agent
 from agents.summary_agent import run_summary_agent
+from core.evidence import EvidenceSnippet, build_evidence_index, evidence_context_for_agent
 from core.pdf_parser import ParsedPaper
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 
@@ -17,6 +18,7 @@ class PaperState(TypedDict, total=False):
 
     # Input
     parsed_paper: ParsedPaper
+    evidence_index: list[EvidenceSnippet]
 
     # Parallel agent outputs
     method_output: MethodOutput
@@ -29,21 +31,26 @@ class PaperState(TypedDict, total=False):
 
 # --- Node functions ---
 
+def evidence_node(state: PaperState) -> dict:
+    paper = state["parsed_paper"]
+    return {"evidence_index": build_evidence_index(paper)}
+
+
 def method_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = paper.get_sections_for_agent("method")
+    text = evidence_context_for_agent(state["evidence_index"], "method") or paper.get_sections_for_agent("method")
     return {"method_output": run_method_agent(text)}
 
 
 def experiment_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = paper.get_sections_for_agent("experiment")
+    text = evidence_context_for_agent(state["evidence_index"], "experiment") or paper.get_sections_for_agent("experiment")
     return {"experiment_output": run_experiment_agent(text)}
 
 
 def critic_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = paper.get_sections_for_agent("critic")
+    text = evidence_context_for_agent(state["evidence_index"], "critic") or paper.get_sections_for_agent("critic")
     return {"critic_output": run_critic_agent(text)}
 
 
@@ -63,15 +70,17 @@ def summary_node(state: PaperState) -> dict:
 def build_graph() -> StateGraph:
     graph = StateGraph(PaperState)
 
+    graph.add_node("evidence", evidence_node)
     graph.add_node("method", method_node)
     graph.add_node("experiment", experiment_node)
     graph.add_node("critic", critic_node)
     graph.add_node("summary", summary_node)
 
-    # Fan-out: START → three parallel agents
-    graph.add_edge(START, "method")
-    graph.add_edge(START, "experiment")
-    graph.add_edge(START, "critic")
+    # Evidence-first fan-out: START → evidence index → three parallel agents
+    graph.add_edge(START, "evidence")
+    graph.add_edge("evidence", "method")
+    graph.add_edge("evidence", "experiment")
+    graph.add_edge("evidence", "critic")
 
     # Fan-in: all three → summary
     graph.add_edge("method", "summary")
@@ -85,6 +94,12 @@ def build_graph() -> StateGraph:
 
 def run_pipeline(parsed_paper: ParsedPaper) -> SummaryOutput:
     """Run the full multi-agent pipeline on a parsed paper."""
+    final_state = run_pipeline_with_state(parsed_paper)
+    return final_state["summary_output"]
+
+
+def run_pipeline_with_state(parsed_paper: ParsedPaper) -> PaperState:
+    """Run the full pipeline and return intermediate agent outputs too."""
     app = build_graph()
     final_state = app.invoke({"parsed_paper": parsed_paper})
-    return final_state["summary_output"]
+    return final_state
