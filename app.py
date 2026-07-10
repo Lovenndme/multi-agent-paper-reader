@@ -26,7 +26,7 @@ from core.evidence import build_evidence_index, evidence_context_for_agent, evid
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 from core.vision import enrich_paper_figures_with_vision
-from utils.llm import is_vision_configured
+from utils.llm import is_llm_configured, is_vision_configured
 
 
 ROOT = Path(__file__).parent
@@ -162,7 +162,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
             f"识别 {title} 所解决的核心研究问题及其主要技术路线。"
         ),
         proposed_method=(
-            "Demo 模式已成功解析 PDF。配置 OPENAI_API_KEY 后，可让真实 MethodAgent "
+            "Demo 模式已成功解析 PDF。配置 GLM_API_KEY 后，可让真实 MethodAgent "
             "分析论文中与方法相关的章节。"
         ),
         key_components=[
@@ -180,7 +180,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
             "该 Demo 结果用于证明前后端链路已经连通；在未运行真实 LLM 时，"
             "不会对论文的具体创新性作出判断。"
         ),
-        implementation_details="在 .env 中配置 OPENAI_API_KEY，即可运行真实结构化分析。",
+        implementation_details="在 .env 中配置 GLM_API_KEY，即可运行真实结构化分析。",
         evidence=demo_evidence,
     )
     experiment = ExperimentOutput(
@@ -210,7 +210,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
         ],
         limitations=[
             "Demo 模式没有执行真实 LLM 评审。",
-            "针对论文的具体批判性分析需要 OPENAI_API_KEY 和兼容模型。",
+            "针对论文的具体批判性分析需要 GLM_API_KEY 和兼容模型。",
         ],
         potential_improvements=[
             "配置真实模型后重新运行分析。",
@@ -232,7 +232,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
         method_highlights=method.proposed_method,
         experiment_highlights=experiment.main_results,
         limitations_and_future_work=(
-            "当前是确定性的 Demo 响应。在 .env 中配置 OPENAI_API_KEY 后，"
+            "当前是确定性的 Demo 响应。在 .env 中配置 GLM_API_KEY 后，"
             "即可运行真实多 Agent 分析。"
         ),
         reading_notes=(
@@ -541,7 +541,8 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "frontend_dist": FRONTEND_DIST.exists(),
-        "llm_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        "llm_configured": is_llm_configured(),
+        "model": os.environ.get("MODEL_NAME", "glm-5.2"),
         "vision_configured": is_vision_configured(),
         "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
     }
@@ -573,11 +574,11 @@ async def analyze_paper(
             outputs = _demo_outputs(parsed)
             mode = "demo"
         else:
-            if not os.environ.get("OPENAI_API_KEY"):
+            if not is_llm_configured():
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        "OPENAI_API_KEY is not set. Add it to .env or call "
+                        "GLM_API_KEY is not set. Add it to .env or call "
                         "/api/analyze?demo=true to verify the upload path."
                     ),
                 )
@@ -607,11 +608,11 @@ async def analyze_paper_stream(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
-    if not demo and not os.environ.get("OPENAI_API_KEY"):
+    if not demo and not is_llm_configured():
         raise HTTPException(
             status_code=503,
             detail=(
-                "OPENAI_API_KEY is not set. Add it to .env or call "
+                "GLM_API_KEY is not set. Add it to .env or call "
                 "/api/analyze/stream?demo=true to verify the upload path."
             ),
         )

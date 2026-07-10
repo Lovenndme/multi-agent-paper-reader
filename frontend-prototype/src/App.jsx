@@ -388,16 +388,20 @@ function ScoreGrid({ critic }) {
     <div className="score-grid">
       <div>
         <h3>创新性评分</h3>
-        <strong>
-          {critic.novelty_score ?? "—"} <span>/ 5</span>
-        </strong>
-        <small>{critic.novelty_score >= 4 ? "创新性较高" : "评审估计"}</small>
-        <p>{critic.novelty_justification || "模型未返回创新性评分依据。"}</p>
+        <div className="score-content">
+          <strong>
+            {critic.novelty_score ?? "—"} <span>/ 5</span>
+          </strong>
+          <small>{critic.novelty_score >= 4 ? "创新性较高" : "评审估计"}</small>
+          <p>{critic.novelty_justification || "模型未返回创新性评分依据。"}</p>
+        </div>
       </div>
       <div>
         <h3>分析置信度</h3>
-        <strong className="confidence">高</strong>
-        <p>基于方法、实验与批判性评审 Agent 的结构化输出</p>
+        <div className="score-content">
+          <strong className="confidence">高</strong>
+          <p>基于方法、实验与批判性评审 Agent 的结构化输出</p>
+        </div>
       </div>
     </div>
   );
@@ -482,7 +486,7 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
             items={[
               "React 前端已能将上传的 PDF 发送到 Python 后端。",
               "前端通过 /api/analyze/stream 接收流式分析结果。",
-              "配置 OPENAI_API_KEY 后即可运行真实分析。",
+              "配置 GLM_API_KEY 后即可运行真实分析。",
               "Demo 模式可以在不使用模型凭证的情况下验证上传与解析链路。",
             ]}
           />
@@ -602,6 +606,8 @@ export function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [chaptersOpen, setChaptersOpen] = useState(true);
+  const [recentOpen, setRecentOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -928,9 +934,38 @@ export function App() {
           <button type="button" onClick={() => setHistoryOpen((value) => !value)}>
             <IconHistory size={18} stroke={1.8} /> History
           </button>
-          <button type="button" onClick={() => downloadNotes("json")}>
-            <IconShare3 size={18} stroke={1.8} /> Export
-          </button>
+          <div className="export-menu">
+            <button
+              className="export-trigger"
+              type="button"
+              aria-haspopup="menu"
+              aria-label="Export options"
+            >
+              <IconShare3 size={18} stroke={1.8} /> Export
+              <IconChevronDown size={14} stroke={1.8} />
+            </button>
+            <div className="export-dropdown glass" role="menu">
+              <button type="button" role="menuitem" onClick={copyJson}>
+                <IconCopy size={17} /> 复制 JSON
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => downloadNotes("markdown")}
+                disabled={!hasFinalAnalysis}
+              >
+                <IconMarkdown size={17} /> 导出 Markdown
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => downloadNotes("json")}
+                disabled={!hasFinalAnalysis}
+              >
+                <IconDownload size={17} /> 下载笔记
+              </button>
+            </div>
+          </div>
           <img src={avatarUrl} alt="Researcher profile" className="avatar" />
           <IconChevronDown size={16} stroke={1.7} />
         </nav>
@@ -985,50 +1020,69 @@ export function App() {
             </div>
           </section>
 
-          <section className="chapters">
-            <h2>章节目录</h2>
-            {displaySections.slice(0, 8).map((chapter, index) => (
-              <button
-                className={`${selectedChapterIndex === index ? "active" : ""} ${chapter.status?.tone || "ready"}`}
-                key={`${chapter.title}-${index}`}
-                type="button"
-                onClick={() => setSelectedChapterIndex(index)}
-              >
-                <span className="chapter-index">{index + 1}</span>
-                <span className="chapter-copy">
-                  <strong>{chapter.displayTitle || cleanChapterTitle(chapter, index)}</strong>
-                  <small>{chapter.meta || chapterMeta(chapter)}</small>
-                </span>
-                <span className={`chapter-status ${chapter.status?.tone || "ready"}`}>
-                  {chapter.status?.icon === "check" ? (
-                    <IconCheck size={12} stroke={2.5} />
-                  ) : (
-                    <i />
-                  )}
-                  {chapter.status?.label || "已识别"}
-                </span>
-              </button>
-            ))}
+          <section className={`chapters ${chaptersOpen ? "expanded" : "collapsed"}`}>
+            <button
+              className="chapters-toggle"
+              type="button"
+              aria-expanded={chaptersOpen}
+              aria-controls="chapter-list"
+              onClick={() => setChaptersOpen((value) => !value)}
+            >
+              <span>章节目录</span>
+              <IconChevronDown className="chapters-chevron" size={16} />
+            </button>
+            <div className="chapters-content" id="chapter-list">
+              {displaySections.map((chapter, index) => (
+                <button
+                  className={`${selectedChapterIndex === index ? "active" : ""} ${chapter.status?.tone || "ready"}`}
+                  key={`${chapter.title}-${index}`}
+                  type="button"
+                  onClick={() => setSelectedChapterIndex(index)}
+                >
+                  <span className="chapter-index">{index + 1}</span>
+                  <span className="chapter-copy">
+                    <strong>{chapter.displayTitle || cleanChapterTitle(chapter, index)}</strong>
+                    <small>{chapter.meta || chapterMeta(chapter)}</small>
+                  </span>
+                  <span className={`chapter-status ${chapter.status?.tone || "ready"}`}>
+                    {chapter.status?.icon === "check" ? (
+                      <IconCheck size={12} stroke={2.5} />
+                    ) : (
+                      <i />
+                    )}
+                    {chapter.status?.label || "已识别"}
+                  </span>
+                </button>
+              ))}
+            </div>
           </section>
 
-          <section className="recent">
-            <div className="section-heading">
+          <section className={`recent ${recentOpen ? "expanded" : "collapsed"}`}>
+            <button
+              className="recent-toggle"
+              type="button"
+              aria-expanded={recentOpen}
+              aria-controls="recent-papers-list"
+              onClick={() => setRecentOpen((value) => !value)}
+            >
               <span>Recent Papers</span>
-              <IconChevronDown size={16} />
-            </div>
-            {recentPapers.slice(0, 2).map((item) => (
-              <button key={item.title} type="button" onClick={() => showToast(`Loaded ${item.title}`)}>
-                <IconFileTypePdf className="pdf-icon" size={28} stroke={1.5} />
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.author}</small>
-                </span>
-                <em>{item.age}</em>
-              </button>
-            ))}
-            <button className="history-link" type="button" onClick={() => setHistoryOpen(true)}>
-              View All History <IconChevronRight size={16} />
+              <IconChevronDown className="recent-chevron" size={16} />
             </button>
+            <div className="recent-content" id="recent-papers-list">
+              {recentPapers.slice(0, 2).map((item) => (
+                <button key={item.title} type="button" onClick={() => showToast(`Loaded ${item.title}`)}>
+                  <IconFileTypePdf className="pdf-icon" size={28} stroke={1.5} />
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>{item.author}</small>
+                  </span>
+                  <em>{item.age}</em>
+                </button>
+              ))}
+              <button className="history-link" type="button" onClick={() => setHistoryOpen(true)}>
+                View All History <IconChevronRight size={16} />
+              </button>
+            </div>
           </section>
         </aside>
 
@@ -1080,11 +1134,6 @@ export function App() {
               isAnalyzing={isAnalyzing}
             />
           </div>
-          <div className="result-actions">
-            <AppButton onClick={copyJson}><IconCopy size={18} /> 复制 JSON</AppButton>
-            <AppButton onClick={() => downloadNotes("markdown")} disabled={!hasFinalAnalysis}><IconMarkdown size={18} /> 导出 Markdown</AppButton>
-            <AppButton onClick={() => downloadNotes("json")} disabled={!hasFinalAnalysis}><IconDownload size={18} /> 下载笔记</AppButton>
-          </div>
         </section>
       </main>
 
@@ -1116,7 +1165,8 @@ export function App() {
             </div>
             <label>
               <span>Model Provider</span>
-              <select defaultValue="openai">
+              <select defaultValue="glm">
+                <option value="glm">Zhipu GLM</option>
                 <option value="openai">OpenAI compatible</option>
                 <option value="qwen">Qwen DashScope</option>
                 <option value="local">Local endpoint</option>
@@ -1124,7 +1174,7 @@ export function App() {
             </label>
             <label>
               <span>Model Name</span>
-              <input defaultValue="gpt-4o-mini" />
+              <input defaultValue="glm-5.2" />
             </label>
             <label>
               <span>Temperature</span>
@@ -1158,6 +1208,7 @@ function AgentCard({ agent }) {
   return (
     <article
       className={`agent-card glass ${agent.state} ${agent.complete ? "complete" : ""} ${agent.active ? "active" : ""} ${agent.failed ? "failed" : ""}`}
+      data-agent-id={agent.id}
       style={{ left: `${agent.x}%`, top: `${agent.y}px` }}
     >
       <div className={`agent-icon ${agent.accent}`}>
