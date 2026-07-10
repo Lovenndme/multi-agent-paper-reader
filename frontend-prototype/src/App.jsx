@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   IconAlertCircle,
   IconBook2,
@@ -58,6 +59,11 @@ const agentStepLabels = ["阅读章节", "提取洞察", "完成输出"];
 const chatMarkdownComponents = {
   a: ({ children, href }) => (
     <a href={href} target="_blank" rel="noreferrer">{children}</a>
+  ),
+  table: ({ children }) => (
+    <div className="chat-table-scroll">
+      <table>{children}</table>
+    </div>
   ),
 };
 
@@ -846,7 +852,12 @@ function PaperChatDrawer({
             )}
             {message.content ? (
               message.role === "assistant" ? (
-                <ReactMarkdown components={chatMarkdownComponents}>{message.content}</ReactMarkdown>
+                <ReactMarkdown
+                  components={chatMarkdownComponents}
+                  remarkPlugins={[remarkGfm]}
+                >
+                  {message.content}
+                </ReactMarkdown>
               ) : (
                 <p>{message.content}</p>
               )
