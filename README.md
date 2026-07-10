@@ -88,7 +88,7 @@ Reliability is not the model's self-reported confidence. Missing related-work co
 
 ## Follow-up Chat
 
-Select text inside the results panel and choose **在侧边聊天中提问** to open the paper chat drawer. A Live analysis continues with the configured `glm-5.2` model and sends bounded context from the current paper, Agent outputs, assessment, evidence previews, selected excerpt, and up to 16 recent conversation turns. Sample and Demo results use a deterministic reply so the complete interaction can be tested without another model call.
+Open the paper chat directly from the AI button at the bottom-right of the results panel, or select text and choose **在侧边聊天中提问** to include that excerpt. A Live analysis continues with the configured `glm-5.2` model and sends bounded context from the current paper, Agent outputs, assessment, evidence previews, optional selected excerpt, and up to 16 recent conversation turns. Sample and Demo results use a deterministic reply so the complete interaction can be tested without another model call.
 
 See [CLAUDE.md](./CLAUDE.md) for the original architecture notes.
 

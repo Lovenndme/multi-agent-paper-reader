@@ -809,7 +809,7 @@ function PaperChatDrawer({
   }
 
   return (
-    <section className="paper-chat-drawer" aria-label="论文追问">
+    <section className="paper-chat-drawer" id="paper-chat-drawer" aria-label="论文追问">
       <header className="chat-header">
         <div>
           <span><IconMessageCircle size={16} stroke={1.8} /> 论文追问</span>
@@ -1051,6 +1051,13 @@ export function App() {
   function openChatFromSelection() {
     if (!selectionAction?.text) return;
     setChatQuote(selectionAction.text);
+    setChatOpen(true);
+    setSelectionAction(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function openChatDirectly() {
+    setChatQuote("");
     setChatOpen(true);
     setSelectionAction(null);
     window.getSelection()?.removeAllRanges();
@@ -1602,6 +1609,20 @@ export function App() {
             >
               <IconMessageCircle size={16} stroke={1.8} /> 在侧边聊天中提问
             </button>
+          )}
+          {!chatOpen && (
+            <div className="results-chat-launcher">
+              <button
+                className="open-paper-chat"
+                type="button"
+                aria-label="打开论文追问"
+                aria-controls="paper-chat-drawer"
+                data-tooltip="打开论文追问"
+                onClick={openChatDirectly}
+              >
+                <IconSparkles size={19} stroke={1.9} />
+              </button>
+            </div>
           )}
           {chatOpen && (
             <PaperChatDrawer
