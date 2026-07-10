@@ -591,14 +591,24 @@ button {
 
 .recent-toggle {
   display: flex !important;
+  width: 100%;
   align-items: center;
   justify-content: space-between;
   min-height: 42px;
-  border-top: 0 !important;
+  border: 0 !important;
   padding: 0 !important;
+  background: transparent;
   color: #19304a;
   font-size: 13px;
   font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent-toggle:focus-visible {
+  outline: 2px solid rgba(8, 116, 255, 0.32);
+  outline-offset: -2px;
+  border-radius: 6px;
 }
 
 .recent-chevron {
@@ -690,14 +700,17 @@ button {
 
 .history-link {
   display: flex !important;
+  width: 100%;
   grid-template-columns: none !important;
   align-items: center;
   justify-content: center;
   gap: 8px;
   margin-top: 8px;
   min-height: 34px;
-  border-top: 0 !important;
+  border: 0 !important;
+  background: transparent;
   font-size: 12px;
+  cursor: pointer;
 }
 
 .agent-stage {
