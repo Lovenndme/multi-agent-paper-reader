@@ -35,7 +35,7 @@ Open:
 http://127.0.0.1:8000/
 ```
 
-For real LLM analysis, copy `.env.example` to `.env` and set `OPENAI_API_KEY`. The UI also has a Demo mode in Model Settings so upload, PDF parsing, API wiring, and result rendering can be verified without an LLM key.
+For real LLM analysis, copy `.env.example` to `.env` and set `GLM_API_KEY`. The default provider is Zhipu GLM at `https://open.bigmodel.cn/api/paas/v4`, using `glm-5.2`. The UI also has a Demo mode in Model Settings so upload, PDF parsing, API wiring, and result rendering can be verified without an LLM key.
 
 For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and `VISION_MODEL_NAME=glm-5v-turbo` or another OpenAI-compatible vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
 
@@ -44,7 +44,7 @@ For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and `VISION_MOD
 ```bash
 pip install -r requirements.txt
 copy .env.example .env
-# Edit .env and set OPENAI_API_KEY
+# Edit .env and set GLM_API_KEY
 
 python main.py examples/your_paper.pdf --pretty
 ```

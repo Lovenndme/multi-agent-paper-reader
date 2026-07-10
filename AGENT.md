@@ -79,15 +79,15 @@ copy .env.example .env
 
 Required environment variable:
 
-- `OPENAI_API_KEY`
+- `GLM_API_KEY`
 
 Supported environment variables:
 
-- `OPENAI_BASE_URL`, default `https://api.openai.com/v1`
-- `MODEL_NAME`, default `gpt-4o-mini`
+- `GLM_BASE_URL`, default `https://open.bigmodel.cn/api/paas/v4`
+- `MODEL_NAME`, default `glm-5.2`
 - `LLM_TEMPERATURE`, default `1.0` in `utils/llm.py`
 
-`.env.example` documents OpenAI and Qwen/DashScope-compatible settings.
+Legacy `OPENAI_API_KEY` and `OPENAI_BASE_URL` variables remain supported for other OpenAI-compatible providers.
 
 ## Run Commands
 
@@ -125,7 +125,7 @@ cd ..
 
 Open `http://127.0.0.1:8000/`.
 
-`POST /api/analyze` accepts multipart PDF uploads. With `demo=true`, it runs the parser and returns deterministic mock agent outputs. Without `demo=true`, it runs the real LangGraph pipeline and requires `OPENAI_API_KEY`.
+`POST /api/analyze` accepts multipart PDF uploads. With `demo=true`, it runs the parser and returns deterministic mock agent outputs. Without `demo=true`, it runs the real LangGraph pipeline and requires `GLM_API_KEY` (or the legacy `OPENAI_API_KEY`).
 
 `POST /api/analyze/stream` is the preferred frontend path. It returns newline-delimited JSON events:
 
@@ -276,7 +276,7 @@ Important behavior:
 
 - Loads `.env` from repo root with `override=False`.
 - Caches `ChatOpenAI` through `@lru_cache(maxsize=1)`.
-- Raises `EnvironmentError` if `OPENAI_API_KEY` is missing.
+- Raises `EnvironmentError` if no GLM/OpenAI-compatible API key is configured.
 - Uses both OpenAI client retry (`max_retries=3`) and local `invoke_with_retry`.
 - `stream_structured_with_retry(...)` streams raw JSON tokens via `ChatOpenAI.stream(...)`, forwards each token through a callback, then parses the accumulated output into the requested Pydantic schema.
 

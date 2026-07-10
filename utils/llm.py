@@ -22,22 +22,43 @@ load_dotenv(dotenv_path=_env_path, override=False)
 # Temperature env var lets users override without code changes.
 # Default 1.0 is required by some providers (e.g. kimi-k2.5).
 _DEFAULT_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "1.0"))
+_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+_DEFAULT_MODEL_NAME = "glm-5.2"
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+def get_api_key() -> str | None:
+    """Return the GLM key, with legacy OpenAI-compatible config support."""
+    return os.environ.get("GLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
+
+def get_base_url() -> str:
+    """Return the configured OpenAI-compatible API base URL."""
+    return (
+        os.environ.get("GLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or _DEFAULT_BASE_URL
+    )
+
+
+def is_llm_configured() -> bool:
+    """Return whether an API key is available for live analysis."""
+    return bool(get_api_key())
 
 
 @lru_cache(maxsize=1)
 def get_llm() -> ChatOpenAI:
     """Return a cached ChatOpenAI instance configured from environment variables."""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_api_key()
     if not api_key:
         raise EnvironmentError(
-            "OPENAI_API_KEY is not set. Copy .env.example to .env and fill in your key."
+            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
         )
 
     return ChatOpenAI(
-        model=os.environ.get("MODEL_NAME", "gpt-4o-mini"),
+        model=os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME),
         api_key=api_key,
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        base_url=get_base_url(),
         temperature=_DEFAULT_TEMPERATURE,
         timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
         max_retries=3,  # built-in openai client retry for transient errors
@@ -47,16 +68,16 @@ def get_llm() -> ChatOpenAI:
 @lru_cache(maxsize=1)
 def get_vision_llm() -> ChatOpenAI:
     """Return a cached vision-capable ChatOpenAI-compatible client."""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_api_key()
     if not api_key:
         raise EnvironmentError(
-            "OPENAI_API_KEY is not set. Copy .env.example to .env and fill in your key."
+            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
         )
 
     return ChatOpenAI(
         model=os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
         api_key=api_key,
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        base_url=get_base_url(),
         temperature=float(os.environ.get("VISION_TEMPERATURE", "0.2")),
         timeout=float(os.environ.get("VISION_TIMEOUT_SECONDS", "180")),
         max_retries=2,
@@ -71,7 +92,7 @@ def is_vision_configured() -> bool:
         "no",
         "off",
     }
-    return enabled and bool(os.environ.get("OPENAI_API_KEY")) and bool(
+    return enabled and is_llm_configured() and bool(
         os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo")
     )
 
