@@ -210,23 +210,40 @@ const sampleAnalysis = {
   },
 };
 
-const recentPapers = [
-  {
-    title: "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
-    author: "Lewis et al., 2020",
-    age: "Just now",
-  },
-  {
-    title: "Attention Is All You Need",
-    author: "Vaswani et al., 2017",
-    age: "2 days ago",
-  },
-  {
-    title: "BERT: Pre-training of Deep Bidirectional Transformers",
-    author: "Devlin et al., 2018",
-    age: "5 days ago",
-  },
-];
+function formatHistoryAge(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return "已保存";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)} 天前`;
+  return new Date(timestamp).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+}
+
+function historyPaperMeta(item) {
+  const details = [item.filename];
+  if (item.pages) details.push(`${item.pages} 页`);
+  return details.filter(Boolean).join(" · ");
+}
+
+function HistoryPaperButton({ item, active, disabled, onOpen }) {
+  return (
+    <button
+      className={`history-paper-button ${active ? "active" : ""}`}
+      type="button"
+      disabled={disabled}
+      onClick={() => onOpen(item)}
+    >
+      <IconFileTypePdf className="pdf-icon" size={28} stroke={1.5} />
+      <span>
+        <strong title={item.title}>{item.title}</strong>
+        <small>{historyPaperMeta(item)}</small>
+      </span>
+      <em>{formatHistoryAge(item.updated_at)}</em>
+    </button>
+  );
+}
 
 const agentBase = [
   {
@@ -919,12 +936,19 @@ export function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
   const [chatStreaming, setChatStreaming] = useState(false);
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState("");
+  const [historyBusyId, setHistoryBusyId] = useState("");
   const fileInputRef = useRef(null);
   const resultsPanelRef = useRef(null);
   const resultsScrollRef = useRef(null);
   const chatAbortRef = useRef(null);
 
-  useEffect(() => () => chatAbortRef.current?.abort(), []);
+  useEffect(() => {
+    void loadPaperHistory();
+    return () => chatAbortRef.current?.abort();
+  }, []);
 
   const displayedData = analysisData || sampleAnalysis;
   const displayedPaper = displayedData.paper;
@@ -1009,6 +1033,90 @@ export function App() {
   function showToast(message) {
     setToast(message);
     window.setTimeout(() => setToast(""), 2200);
+  }
+
+  async function loadPaperHistory() {
+    setHistoryLoading(true);
+    try {
+      const response = await fetch("/api/history?limit=100");
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `History request failed（HTTP ${response.status}）`);
+      }
+      const payload = await response.json();
+      setHistoryItems(Array.isArray(payload.items) ? payload.items : []);
+      setHistoryError("");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "无法读取论文历史。" );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function openHistoryPaper(item) {
+    if (!item?.id || historyBusyId) return;
+    setHistoryBusyId(item.id);
+    try {
+      const response = await fetch(`/api/history/${encodeURIComponent(item.id)}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `History restore failed（HTTP ${response.status}）`);
+      }
+      const payload = await response.json();
+      chatAbortRef.current?.abort();
+      chatAbortRef.current = null;
+      setSelectedFile(null);
+      setSelectedChapterIndex(0);
+      setActiveTab("概览");
+      setAnalysisData(payload);
+      setAnalysisError("");
+      setIsAnalyzing(false);
+      setAgentStates(completeAgentStates);
+      setAgentStreams(emptyAgentStreams);
+      setStreamMessage("已从本地历史恢复完整论文分析。" );
+      setSelectionAction(null);
+      setChatOpen(false);
+      setChatQuote("");
+      setChatInput("");
+      setChatMessages([]);
+      setChatStreaming(false);
+      setHistoryOpen(false);
+      setRecentOpen(true);
+      showToast(`已打开 ${item.title}`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法打开历史论文。" );
+    } finally {
+      setHistoryBusyId("");
+    }
+  }
+
+  async function deleteHistoryPaper(item) {
+    if (!item?.id || historyBusyId) return;
+    setHistoryBusyId(item.id);
+    try {
+      const response = await fetch(`/api/history/${encodeURIComponent(item.id)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `History delete failed（HTTP ${response.status}）`);
+      }
+      if (displayedData.history_id === item.id) {
+        setAnalysisData(sampleAnalysis);
+        setSelectedFile(null);
+        setAgentStates(emptyAgentStates);
+        setAgentStreams(emptyAgentStreams);
+        setStreamMessage("已准备好开始分析");
+        setChatOpen(false);
+        setChatMessages([]);
+      }
+      await loadPaperHistory();
+      showToast("历史论文已删除");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法删除历史论文。" );
+    } finally {
+      setHistoryBusyId("");
+    }
   }
 
   function chooseFile(file) {
@@ -1270,6 +1378,12 @@ export function App() {
       setAgentStates(completeAgentStates);
       setAgentStreams(emptyAgentStreams);
       setStreamMessage("所有 Agent 已完成，最终研读笔记已生成。" );
+      if (payload.history_id) void loadPaperHistory();
+      return "";
+    }
+
+    if (event.type === "history_error") {
+      showToast("分析已完成，但本地历史保存失败。" );
       return "";
     }
 
@@ -1413,7 +1527,13 @@ export function App() {
           <button type="button" onClick={() => setSettingsOpen(true)}>
             <IconSettings size={18} stroke={1.8} /> Model Settings
           </button>
-          <button type="button" onClick={() => setHistoryOpen((value) => !value)}>
+          <button
+            type="button"
+            onClick={() => {
+              if (!historyOpen) void loadPaperHistory();
+              setHistoryOpen((value) => !value);
+            }}
+          >
             <IconHistory size={18} stroke={1.8} /> History
           </button>
           <div className="export-menu">
@@ -1486,7 +1606,7 @@ export function App() {
           <section className="uploaded-card">
             <div className="section-heading">
               <span>Uploaded Paper</span>
-              <small><i /> {selectedFile ? "Ready" : "Sample"}</small>
+              <small><i /> {displayedData.history_id ? "Saved" : selectedFile ? "Ready" : "Sample"}</small>
             </div>
             <div className="paper-card">
               <IconFileTypePdf className="pdf-icon" size={34} stroke={1.6} />
@@ -1545,25 +1665,34 @@ export function App() {
               type="button"
               aria-expanded={recentOpen}
               aria-controls="recent-papers-list"
-              onClick={() => setRecentOpen((value) => !value)}
+              onClick={() => {
+                if (!recentOpen) void loadPaperHistory();
+                setRecentOpen((value) => !value);
+              }}
             >
               <span>Recent Papers</span>
               <IconChevronDown className="recent-chevron" size={16} />
             </button>
             <div className="recent-content" id="recent-papers-list">
-              {recentPapers.slice(0, 2).map((item) => (
-                <button key={item.title} type="button" onClick={() => showToast(`Loaded ${item.title}`)}>
-                  <IconFileTypePdf className="pdf-icon" size={28} stroke={1.5} />
-                  <span>
-                    <strong>{item.title}</strong>
-                    <small>{item.author}</small>
-                  </span>
-                  <em>{item.age}</em>
-                </button>
+              {historyLoading && <div className="history-empty">正在读取历史...</div>}
+              {!historyLoading && historyError && <div className="history-empty error">{historyError}</div>}
+              {!historyLoading && !historyError && !historyItems.length && (
+                <div className="history-empty">暂无已保存论文</div>
+              )}
+              {!historyLoading && historyItems.map((item) => (
+                <HistoryPaperButton
+                  key={item.id}
+                  item={item}
+                  active={displayedData.history_id === item.id}
+                  disabled={historyBusyId === item.id}
+                  onOpen={openHistoryPaper}
+                />
               ))}
-              <button className="history-link" type="button" onClick={() => setHistoryOpen(true)}>
-                View All History <IconChevronRight size={16} />
-              </button>
+              {historyItems.length > 0 && (
+                <button className="history-link" type="button" onClick={() => setHistoryOpen(true)}>
+                  管理全部历史 <IconChevronRight size={16} />
+                </button>
+              )}
             </div>
           </section>
         </aside>
@@ -1667,19 +1796,36 @@ export function App() {
       {historyOpen && (
         <div className="history-popover glass">
           <div className="popover-heading">
-            <strong>Recent reading sessions</strong>
+            <strong>论文历史</strong>
             <button type="button" onClick={() => setHistoryOpen(false)}><IconX size={16} /></button>
           </div>
-          {recentPapers.map((item) => (
-            <button key={item.title} type="button" onClick={() => showToast(`Opened ${item.title}`)}>
-              <IconFileTypePdf size={24} />
-              <span>
-                <strong>{item.title}</strong>
-                <small>{item.author}</small>
-              </span>
-              <em>{item.age}</em>
-            </button>
-          ))}
+          <div className="history-popover-list">
+            {historyLoading && <div className="history-empty">正在读取历史...</div>}
+            {!historyLoading && historyError && <div className="history-empty error">{historyError}</div>}
+            {!historyLoading && !historyError && !historyItems.length && (
+              <div className="history-empty">暂无已保存论文</div>
+            )}
+            {historyItems.map((item) => (
+              <div className="history-popover-row" key={item.id}>
+                <HistoryPaperButton
+                  item={item}
+                  active={displayedData.history_id === item.id}
+                  disabled={historyBusyId === item.id}
+                  onOpen={openHistoryPaper}
+                />
+                <button
+                  className="history-delete"
+                  type="button"
+                  title="删除历史论文"
+                  aria-label={`删除 ${item.title}`}
+                  disabled={historyBusyId === item.id}
+                  onClick={() => deleteHistoryPaper(item)}
+                >
+                  <IconTrash size={15} stroke={1.8} />
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

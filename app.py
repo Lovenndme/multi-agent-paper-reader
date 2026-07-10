@@ -29,6 +29,12 @@ from core.chat import (
     stream_chat_reply,
 )
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
+from core.history import (
+    delete_paper_history,
+    list_paper_history,
+    load_paper_analysis,
+    save_paper_analysis,
+)
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 from core.section_titles import (
@@ -318,6 +324,7 @@ def _stream_demo_analysis(
     paper: ParsedPaper,
     filename: str,
     file_size: int,
+    pdf_data: bytes,
 ) -> Iterable[str]:
     paper_payload = _paper_payload(paper, filename, file_size, {})
     snippets = build_evidence_index(paper)
@@ -356,13 +363,30 @@ def _stream_demo_analysis(
         output=outputs["summary_output"],
         message="summary complete",
     )
-    yield _stream_event("complete", mode="demo", paper=paper_payload, evidence_index=index_payload, **outputs)
+    result_payload = {
+        "mode": "demo",
+        "analysis_id": None,
+        "paper": paper_payload,
+        "evidence_index": index_payload,
+        **outputs,
+    }
+    history_id: str | None = None
+    try:
+        history_id = save_paper_analysis(
+            pdf_data=pdf_data,
+            result=result_payload,
+            snippets=snippets,
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
+        yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
+    yield _stream_event("complete", history_id=history_id, **result_payload)
 
 
 def _stream_live_analysis(
     paper: ParsedPaper,
     filename: str,
     file_size: int,
+    pdf_data: bytes,
     pdf_path: Path | None = None,
 ) -> Iterable[str]:
     raw_titles = [section.title for section in paper.sections]
@@ -535,14 +559,23 @@ def _stream_live_analysis(
         output=outputs["summary_output"],
         message="summary complete",
     )
-    yield _stream_event(
-        "complete",
-        mode="live",
-        analysis_id=analysis_id,
-        paper=paper_payload,
-        evidence_index=index_payload,
+    result_payload = {
+        "mode": "live",
+        "analysis_id": analysis_id,
+        "paper": paper_payload,
+        "evidence_index": index_payload,
         **outputs,
-    )
+    }
+    history_id: str | None = None
+    try:
+        history_id = save_paper_analysis(
+            pdf_data=pdf_data,
+            result=result_payload,
+            snippets=snippets,
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
+        yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
+    yield _stream_event("complete", history_id=history_id, **result_payload)
 
 
 def _stream_analyze_response(
@@ -561,9 +594,9 @@ def _stream_analyze_response(
             return
 
         if demo:
-            yield from _stream_demo_analysis(parsed, filename, len(data))
+            yield from _stream_demo_analysis(parsed, filename, len(data), data)
         else:
-            yield from _stream_live_analysis(parsed, filename, len(data), pdf_path)
+            yield from _stream_live_analysis(parsed, filename, len(data), data, pdf_path)
 
 
 def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[str]:
@@ -596,6 +629,40 @@ def health() -> dict[str, Any]:
         "vision_configured": is_vision_configured(),
         "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
     }
+
+
+@app.get("/api/history")
+def paper_history(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """List locally persisted paper analyses, newest first."""
+    return {"items": list_paper_history(limit=limit)}
+
+
+@app.get("/api/history/{history_id}")
+def history_analysis(history_id: str) -> dict[str, Any]:
+    """Restore one saved analysis and recreate its grounded chat session."""
+    stored = load_paper_analysis(history_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Saved paper analysis was not found.")
+
+    result = dict(stored["result"])
+    snippets = stored["snippets"]
+    analysis_id: str | None = None
+    if result.get("mode") == "live" and snippets:
+        analysis_id = store_analysis_session(snippets, result)
+    result["analysis_id"] = analysis_id
+    result["history_id"] = history_id
+    result["history_item"] = stored["history"]
+    return result
+
+
+@app.delete("/api/history/{history_id}")
+def remove_history_analysis(history_id: str) -> dict[str, bool]:
+    """Delete one saved analysis and its retained PDF."""
+    if not delete_paper_history(history_id):
+        raise HTTPException(status_code=404, detail="Saved paper analysis was not found.")
+    return {"ok": True}
 
 
 @app.post("/api/analyze")
@@ -646,10 +713,15 @@ async def analyze_paper(
             mode = "live"
 
     paper_payload = _paper_payload(parsed, filename, len(data), translated_titles)
+    snippets = build_evidence_index(parsed)
+    index_payload = outputs.get("evidence_index")
+    if not isinstance(index_payload, list):
+        index_payload = evidence_payload(snippets)
+        outputs["evidence_index"] = index_payload
     analysis_id: str | None = None
     if mode == "live":
         analysis_id = store_analysis_session(
-            build_evidence_index(parsed),
+            snippets,
             {
                 "mode": mode,
                 "paper": paper_payload,
@@ -657,12 +729,22 @@ async def analyze_paper(
             },
         )
 
-    return {
+    result_payload = {
         "mode": mode,
         "analysis_id": analysis_id,
         "paper": paper_payload,
         **outputs,
     }
+    try:
+        result_payload["history_id"] = save_paper_analysis(
+            pdf_data=data,
+            result=result_payload,
+            snippets=snippets,
+        )
+    except Exception as exc:  # noqa: BLE001 - return analysis with an actionable warning
+        result_payload["history_id"] = None
+        result_payload["history_warning"] = f"Could not save paper history: {exc}"
+    return result_payload
 
 
 @app.post("/api/analyze/stream")

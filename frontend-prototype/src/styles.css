@@ -629,8 +629,7 @@ button {
   scrollbar-color: rgba(86, 117, 148, 0.24) transparent;
 }
 
-.recent button,
-.history-popover button {
+.history-paper-button {
   display: grid;
   grid-template-columns: 30px 1fr auto;
   align-items: center;
@@ -644,8 +643,17 @@ button {
   cursor: pointer;
 }
 
-.recent strong,
-.history-popover strong {
+.history-paper-button:hover,
+.history-paper-button.active {
+  background: rgba(222, 238, 254, 0.54);
+}
+
+.history-paper-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.history-paper-button strong {
   display: -webkit-box;
   overflow: hidden;
   color: #18314d;
@@ -655,19 +663,29 @@ button {
   -webkit-box-orient: vertical;
 }
 
-.recent small,
-.history-popover small {
+.history-paper-button small {
   display: block;
   margin-top: 3px;
   color: rgba(40, 65, 89, 0.58);
   font-size: 11px;
 }
 
-.recent em,
-.history-popover em {
+.history-paper-button em {
   color: rgba(50, 74, 96, 0.62);
   font-size: 10.5px;
   font-style: normal;
+}
+
+.history-empty {
+  padding: 14px 4px;
+  color: rgba(42, 67, 91, 0.58);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.history-empty.error {
+  color: #b84b45;
 }
 
 .history-link {
@@ -1860,6 +1878,46 @@ button {
   width: 340px;
   border-radius: 20px;
   padding: 14px;
+}
+
+.history-popover-list {
+  max-height: min(430px, calc(100vh - 150px));
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.history-popover-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  border-top: 1px solid rgba(97, 124, 149, 0.13);
+}
+
+.history-popover-row .history-paper-button {
+  min-width: 0;
+  border-top: 0;
+}
+
+.history-delete {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(54, 79, 102, 0.52);
+  cursor: pointer;
+}
+
+.history-delete:hover {
+  background: rgba(221, 80, 71, 0.1);
+  color: #bd463f;
+}
+
+.history-delete:disabled {
+  cursor: wait;
+  opacity: 0.45;
 }
 
 .popover-heading {
