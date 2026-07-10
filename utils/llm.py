@@ -66,6 +66,25 @@ def get_llm() -> ChatOpenAI:
 
 
 @lru_cache(maxsize=1)
+def get_chat_llm() -> ChatOpenAI:
+    """Return the same text model with a lower temperature for grounded paper QA."""
+    api_key = get_api_key()
+    if not api_key:
+        raise EnvironmentError(
+            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
+        )
+
+    return ChatOpenAI(
+        model=os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME),
+        api_key=api_key,
+        base_url=get_base_url(),
+        temperature=float(os.environ.get("CHAT_TEMPERATURE", "0.25")),
+        timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
+        max_retries=3,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_vision_llm() -> ChatOpenAI:
     """Return a cached vision-capable ChatOpenAI-compatible client."""
     api_key = get_api_key()

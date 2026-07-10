@@ -1,10 +1,11 @@
+import os
 import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.schemas import ExperimentOutput
-from utils.llm import parse_structured_output, stream_structured_with_retry
+from utils.llm import get_chat_llm, parse_structured_output, stream_structured_with_retry
 
 
 class FakeStreamingLLM:
@@ -41,6 +42,19 @@ class FakeNeedsRepairLLM:
 
 
 class TestStructuredOutputParsing(unittest.TestCase):
+    def tearDown(self):
+        get_chat_llm.cache_clear()
+
+    def test_chat_model_uses_separate_low_temperature(self):
+        get_chat_llm.cache_clear()
+        with (
+            patch.dict(os.environ, {"CHAT_TEMPERATURE": "0.2"}),
+            patch("utils.llm.get_api_key", return_value="test-key"),
+        ):
+            chat_llm = get_chat_llm()
+
+        self.assertEqual(chat_llm.temperature, 0.2)
+
     def test_accepts_fenced_json_from_compatible_provider(self):
         response = AIMessage(
             content="""```json

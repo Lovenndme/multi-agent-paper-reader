@@ -1245,6 +1245,53 @@ button {
   overflow-wrap: anywhere;
 }
 
+.chat-message p + p,
+.chat-message p + ul,
+.chat-message p + ol,
+.chat-message ul + p,
+.chat-message ol + p {
+  margin-top: 7px;
+}
+
+.chat-message ul,
+.chat-message ol {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.chat-message li + li {
+  margin-top: 3px;
+}
+
+.chat-message strong {
+  font-weight: 700;
+}
+
+.chat-message a {
+  color: #0874db;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.chat-message h1,
+.chat-message h2,
+.chat-message h3,
+.chat-message h4 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.chat-message code {
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(28, 78, 121, 0.08);
+  font-size: 11px;
+}
+
 .chat-message blockquote {
   display: flex;
   gap: 6px;

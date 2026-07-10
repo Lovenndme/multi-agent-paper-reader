@@ -10,12 +10,20 @@ from core.chat import (
     ChatHistoryTurn,
     PaperChatRequest,
     build_chat_messages,
+    clear_analysis_sessions,
     compact_analysis_context,
     demo_chat_reply,
+    get_analysis_session,
+    retrieve_chat_evidence,
+    store_analysis_session,
 )
+from core.evidence import EvidenceSnippet
 
 
 class TestPaperChat(unittest.TestCase):
+    def setUp(self):
+        clear_analysis_sessions()
+
     def test_builds_messages_with_context_history_and_selected_excerpt(self):
         request = PaperChatRequest(
             question="这个结论为什么成立？",
@@ -66,6 +74,148 @@ class TestPaperChat(unittest.TestCase):
 
         self.assertIn("一段需要解释的论文结论", reply)
         self.assertIn("GLM-5.2", reply)
+
+    def test_session_retrieval_uses_complete_relevant_evidence(self):
+        snippets = [
+            EvidenceSnippet(
+                id="E001",
+                section="Method",
+                page_start=1,
+                page_end=1,
+                text="The architecture uses a dual encoder and a gated fusion mechanism.",
+            ),
+            EvidenceSnippet(
+                id="E002",
+                section="Experiments",
+                page_start=4,
+                page_end=4,
+                text="Experiments report accuracy, F1 score, and latency on Dataset Alpha.",
+            ),
+        ]
+        analysis_id = store_analysis_session(
+            snippets,
+            {"paper": {"title": "Test Paper"}, "summary_output": {}},
+        )
+        request = PaperChatRequest(
+            analysis_id=analysis_id,
+            question="实验使用了哪些指标？",
+        )
+
+        messages = build_chat_messages(request)
+        retrieved = retrieve_chat_evidence(
+            session=get_analysis_session(analysis_id),
+            question=request.question,
+            selected_text=None,
+            history=[],
+        )
+
+        self.assertEqual(retrieved[0].id, "E002")
+        self.assertIn("accuracy, F1 score, and latency", messages[0].content)
+        self.assertIn("[E002 | text | Experiments | p.5]", messages[0].content)
+
+    def test_agent_citations_bridge_translated_summary_back_to_source(self):
+        snippets = [
+            EvidenceSnippet(
+                id="E001",
+                section="Introduction",
+                page_start=0,
+                page_end=0,
+                text="This paper studies a general sequence transduction problem.",
+            ),
+            EvidenceSnippet(
+                id="E003",
+                section="Technical Details",
+                page_start=2,
+                page_end=2,
+                text="The decoder attends to all encoder positions in each layer.",
+            ),
+        ]
+        analysis_id = store_analysis_session(
+            snippets,
+            {
+                "paper": {"title": "Test Paper"},
+                "method_output": {
+                    "proposed_method": "解码器在每一层关注所有编码器位置。",
+                    "evidence": [
+                        {
+                            "id": "E003",
+                            "section": "Technical Details",
+                            "page": "p.3",
+                            "quote": "decoder attends to all encoder positions",
+                            "note": "支持解码器机制描述",
+                        }
+                    ],
+                },
+            },
+        )
+
+        retrieved = retrieve_chat_evidence(
+            session=get_analysis_session(analysis_id),
+            question="这段解码器机制具体是什么意思？",
+            selected_text="解码器在每一层关注所有编码器位置。",
+            history=[],
+        )
+
+        self.assertEqual(retrieved[0].id, "E003")
+
+    def test_broad_question_gets_diverse_source_sections(self):
+        snippets = [
+            EvidenceSnippet("E001", "Abstract", 0, 0, "Abstract evidence."),
+            EvidenceSnippet("E002", "Method", 1, 1, "Method evidence."),
+            EvidenceSnippet("E003", "Experiments", 2, 2, "Experiment evidence."),
+            EvidenceSnippet("E004", "Conclusion", 3, 3, "Conclusion evidence."),
+        ]
+        analysis_id = store_analysis_session(
+            snippets,
+            {"paper": {"title": "Test Paper"}},
+        )
+
+        retrieved = retrieve_chat_evidence(
+            session=get_analysis_session(analysis_id),
+            question="请详细解释一下这篇论文。",
+            selected_text=None,
+            history=[],
+        )
+
+        self.assertEqual(len(retrieved), 4)
+        self.assertEqual(len({item.section for item in retrieved}), 4)
+
+    def test_prompt_uses_full_snippet_not_api_preview_length(self):
+        trailing_evidence = "FULL_SOURCE_SENTINEL_AFTER_PREVIEW"
+        snippet = EvidenceSnippet(
+            "E007",
+            "Experiments",
+            6,
+            6,
+            "x" * 260 + trailing_evidence,
+        )
+        analysis_id = store_analysis_session(
+            [snippet],
+            {
+                "paper": {"title": "Long Evidence"},
+                "experiment_output": {
+                    "evidence": [
+                        {
+                            "id": "E007",
+                            "section": "Experiments",
+                            "page": "p.7",
+                            "quote": trailing_evidence,
+                            "note": "supports the result",
+                        }
+                    ]
+                },
+            },
+        )
+
+        messages = build_chat_messages(
+            PaperChatRequest(
+                analysis_id=analysis_id,
+                question=f"请解释 {trailing_evidence}",
+            )
+        )
+
+        self.assertIn(trailing_evidence, messages[0].content)
+        self.assertIn("x" * 240, messages[0].content)
 
 
 if __name__ == "__main__":

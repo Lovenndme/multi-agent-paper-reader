@@ -22,7 +22,12 @@ from agents.experiment_agent import run_experiment_agent, stream_experiment_agen
 from agents.method_agent import run_method_agent, stream_method_agent
 from agents.summary_agent import run_summary_agent, stream_summary_agent
 from core.assessment import build_analysis_assessment
-from core.chat import PaperChatRequest, demo_chat_reply, stream_chat_reply
+from core.chat import (
+    PaperChatRequest,
+    demo_chat_reply,
+    store_analysis_session,
+    stream_chat_reply,
+)
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
@@ -514,6 +519,15 @@ def _stream_live_analysis(
         critic_model,
         summary_output,
     ).model_dump()
+    analysis_id = store_analysis_session(
+        snippets,
+        {
+            "mode": "live",
+            "paper": paper_payload,
+            "evidence_index": index_payload,
+            **outputs,
+        },
+    )
     yield _stream_event(
         "agent_complete",
         agent="summary",
@@ -521,7 +535,14 @@ def _stream_live_analysis(
         output=outputs["summary_output"],
         message="summary complete",
     )
-    yield _stream_event("complete", mode="live", paper=paper_payload, evidence_index=index_payload, **outputs)
+    yield _stream_event(
+        "complete",
+        mode="live",
+        analysis_id=analysis_id,
+        paper=paper_payload,
+        evidence_index=index_payload,
+        **outputs,
+    )
 
 
 def _stream_analyze_response(
@@ -624,9 +645,22 @@ async def analyze_paper(
                 raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
             mode = "live"
 
+    paper_payload = _paper_payload(parsed, filename, len(data), translated_titles)
+    analysis_id: str | None = None
+    if mode == "live":
+        analysis_id = store_analysis_session(
+            build_evidence_index(parsed),
+            {
+                "mode": mode,
+                "paper": paper_payload,
+                **outputs,
+            },
+        )
+
     return {
         "mode": mode,
-        "paper": _paper_payload(parsed, filename, len(data), translated_titles),
+        "analysis_id": analysis_id,
+        "paper": paper_payload,
         **outputs,
     }
 

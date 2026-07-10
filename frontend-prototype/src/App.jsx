@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import {
   IconAlertCircle,
   IconBook2,
@@ -53,6 +54,12 @@ const completeAgentStates = {
 };
 
 const agentStepLabels = ["阅读章节", "提取洞察", "完成输出"];
+
+const chatMarkdownComponents = {
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer">{children}</a>
+  ),
+};
 
 const sampleAnalysis = {
   mode: "sample",
@@ -838,7 +845,11 @@ function PaperChatDrawer({
               <blockquote><IconQuote size={14} stroke={1.8} /> {message.quote}</blockquote>
             )}
             {message.content ? (
-              <p>{message.content}</p>
+              message.role === "assistant" ? (
+                <ReactMarkdown components={chatMarkdownComponents}>{message.content}</ReactMarkdown>
+              ) : (
+                <p>{message.content}</p>
+              )
             ) : (
               <span className="chat-typing" aria-label="正在生成"><i /><i /><i /></span>
             )}
@@ -1098,6 +1109,7 @@ export function App() {
         signal: controller.signal,
         body: JSON.stringify({
           question,
+          analysis_id: displayedData.analysis_id || null,
           selected_text: quote || null,
           history,
           context: analysisContextForChat(displayedData),
