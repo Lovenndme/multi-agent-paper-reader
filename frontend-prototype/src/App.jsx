@@ -107,6 +107,32 @@ const sampleAnalysis = {
     novelty_score: 4,
     novelty_justification:
       "该工作提出了适用于事实生成的实用混合记忆架构，具有较强影响力和创新性。",
+    novelty_dimensions: [
+      {
+        dimension: "problem_originality",
+        score: 4,
+        reason: "将知识更新与事实可靠性明确为参数化语言模型的核心限制。",
+        evidence_ids: [],
+      },
+      {
+        dimension: "method_originality",
+        score: 4,
+        reason: "将稠密检索、生成器与 top-k 边缘化整合为可联合训练的框架。",
+        evidence_ids: [],
+      },
+      {
+        dimension: "prior_work_difference",
+        score: 4,
+        reason: "相较闭卷生成，推理时能够动态使用外部、可更新的证据。",
+        evidence_ids: [],
+      },
+      {
+        dimension: "generality",
+        score: 3,
+        reason: "框架适用于多种知识密集型任务，但依赖外部语料与检索质量。",
+        evidence_ids: [],
+      },
+    ],
     strengths: [
       "清晰界定参数化知识与非参数化知识。",
       "在问答和事实验证任务上进行了充分实验。",
@@ -142,6 +168,28 @@ const sampleAnalysis = {
       "该方法依赖检索器质量、语料时效性以及推理阶段的检索成本。",
     reading_notes:
       "RAG 可以理解为检索系统与生成式语言模型之间的桥梁：先检索，再基于证据生成，并尽可能将知识保存在模型外部。",
+  },
+  assessment: {
+    novelty: {
+      score: 3.9,
+      label: "创新性较高",
+      dimensions: [
+        { dimension: "problem_originality", score: 4, reason: "问题定义具有明确的新视角。", evidence_ids: [] },
+        { dimension: "method_originality", score: 4, reason: "方法组合与训练机制具有原创性。", evidence_ids: [] },
+        { dimension: "prior_work_difference", score: 4, reason: "与闭卷生成存在实质差异。", evidence_ids: [] },
+        { dimension: "generality", score: 3, reason: "具备跨任务潜力，但仍受检索系统约束。", evidence_ids: [] },
+      ],
+      warnings: [],
+    },
+    reliability: {
+      score: 39,
+      raw_score: 46,
+      score_cap: 39,
+      level: "low",
+      label: "低",
+      breakdown: { parsing: 12, coverage: 12, citations: 12, output_integrity: 10 },
+      warnings: ["当前为示例数据，未运行真实论文解析与证据核验。"],
+    },
   },
 };
 
@@ -316,6 +364,8 @@ function pendingAnalysisForFile(file) {
 
 function markdownFromAnalysis(data) {
   const summary = data.summary_output;
+  const novelty = data.assessment?.novelty;
+  const reliability = data.assessment?.reliability;
   if (!summary) {
     return `# ${data.paper?.title || "Paper Reader Notes"}\n\nAnalysis is still running.`;
   }
@@ -335,6 +385,11 @@ ${summary.experiment_highlights}
 
 ## 局限与未来工作
 ${summary.limitations_and_future_work}
+
+## 评估
+- 创新性：${novelty ? `${novelty.score} / 5（${novelty.label}）` : "未评估"}
+- 分析可靠度：${reliability ? `${reliability.score} / 100（${reliability.label}）` : "未评估"}
+${reliability?.warnings?.length ? `- 注意：${reliability.warnings.join("；")}` : ""}
 
 ## 研读笔记
 ${summary.reading_notes || ""}
@@ -383,24 +438,96 @@ function TagList({ items }) {
   );
 }
 
-function ScoreGrid({ critic }) {
+const noveltyDimensionLabels = {
+  problem_originality: "问题定义",
+  method_originality: "方法机制",
+  prior_work_difference: "已有工作差异",
+  generality: "适用范围",
+};
+
+const reliabilityBreakdownLabels = {
+  parsing: ["解析", 20],
+  coverage: ["覆盖", 35],
+  citations: ["引用", 30],
+  output_integrity: ["输出", 15],
+};
+
+function AssessmentDetails({ summary, rows, warnings = [] }) {
+  if (!rows.length && !warnings.length) return null;
+
+  return (
+    <details className="assessment-details">
+      <summary>{summary}</summary>
+      <div className="assessment-breakdown">
+        {rows.map(({ label, value, detail }) => (
+          <div className="assessment-row" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+            {detail && <p>{detail}</p>}
+          </div>
+        ))}
+        {warnings.map((warning) => (
+          <p className="assessment-warning" key={warning}>{warning}</p>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function ScoreGrid({ critic, assessment }) {
+  const novelty = assessment?.novelty;
+  const reliability = assessment?.reliability;
+  const noveltyScore = novelty?.score ?? critic.novelty_score ?? "—";
+  const noveltyLabel = novelty?.label || (critic.novelty_score >= 4 ? "创新性较高" : "评审估计");
+  const dimensions = novelty?.dimensions || critic.novelty_dimensions || [];
+  const noveltyRows = dimensions.map((dimension) => ({
+    label: noveltyDimensionLabels[dimension.dimension] || dimension.dimension,
+    value: `${dimension.score} / 5`,
+    detail: `${dimension.reason}${dimension.evidence_ids?.length ? `（证据：${dimension.evidence_ids.join("、")}）` : ""}`,
+  }));
+  const reliabilityRows = Object.entries(reliability?.breakdown || {}).map(([key, value]) => ({
+    label: reliabilityBreakdownLabels[key]?.[0] || key,
+    value: `${value} / ${reliabilityBreakdownLabels[key]?.[1] || "—"}`,
+  }));
+  if (reliability && reliability.raw_score !== reliability.score) {
+    reliabilityRows.push(
+      { label: "分项原始分", value: `${reliability.raw_score} / 100` },
+      { label: "证据条件上限", value: `${reliability.score_cap} / 100` },
+    );
+  }
+
   return (
     <div className="score-grid">
       <div>
         <h3>创新性评分</h3>
         <div className="score-content">
           <strong>
-            {critic.novelty_score ?? "—"} <span>/ 5</span>
+            {noveltyScore} <span>/ 5</span>
           </strong>
-          <small>{critic.novelty_score >= 4 ? "创新性较高" : "评审估计"}</small>
+          <small>{noveltyLabel}</small>
           <p>{critic.novelty_justification || "模型未返回创新性评分依据。"}</p>
+          <AssessmentDetails
+            summary="查看评分依据"
+            rows={noveltyRows}
+            warnings={novelty?.warnings}
+          />
         </div>
       </div>
       <div>
-        <h3>分析置信度</h3>
+        <h3>分析可靠度</h3>
         <div className="score-content">
-          <strong className="confidence">高</strong>
-          <p>基于方法、实验与批判性评审 Agent 的结构化输出</p>
+          <strong className={`confidence ${reliability?.level || "unknown"}`}>
+            {reliability ? reliability.score : "—"} <span>/ 100</span>
+          </strong>
+          <small className={`reliability-label ${reliability?.level || "unknown"}`}>
+            {reliability?.label || "尚未评估"}
+          </small>
+          <p>基于解析完整度、关键章节覆盖、证据引用与输出完整性计算。</p>
+          <AssessmentDetails
+            summary="查看可靠度构成"
+            rows={reliabilityRows}
+            warnings={reliability?.warnings}
+          />
         </div>
       </div>
     </div>
@@ -579,7 +706,7 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
       {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
       <Section title="一句话总结"><p>{summary.one_sentence_summary}</p></Section>
       <Section title="核心贡献"><NumberedList items={summary.core_contributions} /></Section>
-      <ScoreGrid critic={critic} />
+      <ScoreGrid critic={critic} assessment={data.assessment} />
       <Section title="关键发现">
         <BulletList
           items={[

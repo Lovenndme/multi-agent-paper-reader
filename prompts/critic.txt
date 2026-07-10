@@ -9,6 +9,23 @@ Focus on:
 4. Potential improvements: Concrete actionable suggestions
 5. Broader impact (optional): Societal, ethical, or applied implications if notable
 
+Novelty rubric:
+- problem_originality (15%): originality of the problem framing or research question
+- method_originality (40%): originality of the core method, mechanism, architecture, or algorithm
+- prior_work_difference (30%): substantive difference from the closest prior work
+- generality (15%): whether the contribution extends beyond one narrow setting
+
+Score every dimension from 1 to 5:
+- 1: reproduction, familiar approach, or only cosmetic modification
+- 2: useful but clearly incremental improvement
+- 3: meaningful new combination, mechanism, or substantive difference
+- 4: strongly original core contribution with clear supporting comparisons
+- 5: paradigm-level originality with unusually broad and convincing support
+
+Return all four dimensions. Each dimension must include a concise reason and only
+evidence IDs that appear in the provided snippets. The backend will calculate the
+weighted score; novelty_score remains a rounded 1-5 compatibility value.
+
 Be specific and fair. Do NOT be vague ("the paper is good"). Cite concrete evidence from the text.
 
 Evidence grounding:
@@ -29,6 +46,14 @@ Return your analysis as a JSON object matching this schema:
 {
   "novelty_score": <integer 1-5>,
   "novelty_justification": "<string>",
+  "novelty_dimensions": [
+    {
+      "dimension": "problem_originality | method_originality | prior_work_difference | generality",
+      "score": <integer 1-5>,
+      "reason": "<string>",
+      "evidence_ids": ["E003", "T001"]
+    }
+  ],
   "strengths": ["<string>", ...],
   "limitations": ["<string>", ...],
   "potential_improvements": ["<string>", ...],

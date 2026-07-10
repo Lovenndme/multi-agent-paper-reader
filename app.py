@@ -22,6 +22,7 @@ from agents.critic_agent import run_critic_agent, stream_critic_agent
 from agents.experiment_agent import run_experiment_agent, stream_experiment_agent
 from agents.method_agent import run_method_agent, stream_method_agent
 from agents.summary_agent import run_summary_agent, stream_summary_agent
+from core.assessment import build_analysis_assessment
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
@@ -240,11 +241,22 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
         ),
         evidence=demo_evidence,
     )
+    snippets = build_evidence_index(paper)
+    assessment = build_analysis_assessment(
+        paper,
+        snippets,
+        method,
+        experiment,
+        critic,
+        summary,
+        demo=True,
+    )
     return {
         "method_output": method.model_dump(),
         "experiment_output": experiment.model_dump(),
         "critic_output": critic.model_dump(),
         "summary_output": summary.model_dump(),
+        "assessment": assessment.model_dump(),
     }
 
 
@@ -267,12 +279,21 @@ def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str,
         experiment_output=experiment,
         critic_output=critic,
     )
+    assessment = build_analysis_assessment(
+        paper,
+        snippets,
+        method,
+        experiment,
+        critic,
+        summary,
+    )
     return {
         "evidence_index": evidence_payload(snippets),
         "method_output": method.model_dump(),
         "experiment_output": experiment.model_dump(),
         "critic_output": critic.model_dump(),
         "summary_output": summary.model_dump(),
+        "assessment": assessment.model_dump(),
     }
 
 
@@ -485,12 +506,15 @@ def _stream_live_analysis(
 
     yield _stream_event("agent_started", agent="summary", message="summary started")
     try:
+        method_model = MethodOutput.model_validate(outputs["method_output"])
+        experiment_model = ExperimentOutput.model_validate(outputs["experiment_output"])
+        critic_model = CriticOutput.model_validate(outputs["critic_output"])
         summary_model: SummaryOutput | None = None
         for event, maybe_summary in _stream_summary_agent_events(
             paper.title,
-            MethodOutput.model_validate(outputs["method_output"]),
-            ExperimentOutput.model_validate(outputs["experiment_output"]),
-            CriticOutput.model_validate(outputs["critic_output"]),
+            method_model,
+            experiment_model,
+            critic_model,
         ):
             if event:
                 yield event
@@ -504,6 +528,14 @@ def _stream_live_analysis(
         return
 
     outputs["summary_output"] = summary_output.model_dump()
+    outputs["assessment"] = build_analysis_assessment(
+        paper,
+        snippets,
+        method_model,
+        experiment_model,
+        critic_model,
+        summary_output,
+    ).model_dump()
     yield _stream_event(
         "agent_complete",
         agent="summary",

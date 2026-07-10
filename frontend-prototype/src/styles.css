@@ -1242,7 +1242,22 @@ button {
 
 .score-grid .confidence {
   color: #13985e;
-  font-size: 21px;
+  font-size: 24px;
+}
+
+.score-grid .confidence.medium,
+.score-grid .reliability-label.medium {
+  color: #b76a08;
+}
+
+.score-grid .confidence.low,
+.score-grid .reliability-label.low {
+  color: #bd3b3b;
+}
+
+.score-grid .confidence.unknown,
+.score-grid .reliability-label.unknown {
+  color: rgba(35, 58, 82, 0.54);
 }
 
 .score-grid small {
@@ -1259,6 +1274,61 @@ button {
   color: rgba(35, 58, 82, 0.62);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.assessment-details {
+  width: 100%;
+  margin-top: 12px;
+  color: #294864;
+  font-size: 11px;
+  text-align: left;
+}
+
+.assessment-details summary {
+  width: max-content;
+  margin: 0 auto;
+  cursor: pointer;
+  color: #176fc7;
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.assessment-breakdown {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(83, 112, 140, 0.14);
+}
+
+.assessment-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  align-items: baseline;
+}
+
+.score-grid .assessment-row strong {
+  color: #1d3852;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.score-grid .assessment-row p {
+  grid-column: 1 / -1;
+  max-width: none;
+  margin: 0;
+  color: rgba(35, 58, 82, 0.58);
+  font-size: 10px;
+  text-align: left;
+}
+
+.score-grid .assessment-warning {
+  max-width: none;
+  margin-top: 2px;
+  color: #995b16;
+  font-size: 10px;
+  text-align: left;
 }
 
 .bullets {
@@ -1646,5 +1716,29 @@ button {
 
   .export-dropdown {
     right: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .score-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .score-grid > div {
+    padding-right: 0;
+  }
+
+  .score-grid > div + div {
+    padding-top: 20px;
+    padding-left: 0;
+    border-top: 1px solid rgba(83, 112, 140, 0.16);
+    border-left: 0;
+  }
+
+  .score-grid > div:first-child .score-content,
+  .score-grid > div + div .score-content {
+    width: 100%;
+    margin-left: 0;
   }
 }

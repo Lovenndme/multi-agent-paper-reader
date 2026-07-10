@@ -40,8 +40,10 @@ AGENT_TERMS = {
     },
     "critic": {
         "abstract", "introduction", "related work", "discussion", "limitation",
-        "limitations", "conclusion", "future work", "analysis", "实验", "讨论",
-        "局限", "结论", "未来工作", "相关工作",
+        "limitations", "conclusion", "future work", "analysis", "method",
+        "methodology", "model", "approach", "framework", "experiment",
+        "experiments", "evaluation", "result", "results", "实验", "方法",
+        "模型", "讨论", "局限", "结论", "未来工作", "相关工作",
     },
 }
 

@@ -52,11 +52,32 @@ class ExperimentOutput(BaseModel):
     )
 
 
+class NoveltyDimensionScore(BaseModel):
+    """One evidence-backed component of the novelty assessment."""
+
+    dimension: str = Field(
+        description=(
+            "Stable dimension key: problem_originality, method_originality, "
+            "prior_work_difference, or generality"
+        )
+    )
+    score: int = Field(ge=1, le=5, description="Dimension score from 1 to 5")
+    reason: str = Field(description="Evidence-grounded reason for this dimension score")
+    evidence_ids: List[str] = Field(
+        default_factory=list,
+        description="Evidence IDs supporting this dimension score",
+    )
+
+
 class CriticOutput(BaseModel):
     """CriticAgent output: critical review and assessment."""
 
     novelty_score: int = Field(ge=1, le=5, description="Novelty score from 1 (low) to 5 (high)")
     novelty_justification: str = Field(description="Justification for the novelty score")
+    novelty_dimensions: List[NoveltyDimensionScore] = Field(
+        default_factory=list,
+        description="Four evidence-backed novelty dimension scores",
+    )
     strengths: List[str] = Field(description="Key strengths of this work")
     limitations: List[str] = Field(description="Identified limitations of the paper")
     potential_improvements: List[str] = Field(description="Suggested directions for improvement")
@@ -67,6 +88,43 @@ class CriticOutput(BaseModel):
         default_factory=list,
         description="Key evidence snippets supporting critical review claims",
     )
+
+
+class NoveltyAssessment(BaseModel):
+    """Backend-calculated novelty result."""
+
+    score: float = Field(ge=1, le=5)
+    label: str
+    dimensions: List[NoveltyDimensionScore] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ReliabilityBreakdown(BaseModel):
+    """Deterministic components of analysis reliability."""
+
+    parsing: int = Field(ge=0, le=20)
+    coverage: int = Field(ge=0, le=35)
+    citations: int = Field(ge=0, le=30)
+    output_integrity: int = Field(ge=0, le=15)
+
+
+class ReliabilityAssessment(BaseModel):
+    """Deterministic reliability score for the generated analysis."""
+
+    score: int = Field(ge=0, le=100)
+    raw_score: int = Field(ge=0, le=100)
+    score_cap: int = Field(ge=0, le=100)
+    level: str
+    label: str
+    breakdown: ReliabilityBreakdown
+    warnings: List[str] = Field(default_factory=list)
+
+
+class AnalysisAssessment(BaseModel):
+    """Combined novelty and reliability assessment returned by the API."""
+
+    novelty: NoveltyAssessment
+    reliability: ReliabilityAssessment
 
 
 class SummaryOutput(BaseModel):

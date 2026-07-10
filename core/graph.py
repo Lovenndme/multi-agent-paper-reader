@@ -8,9 +8,10 @@ from agents.critic_agent import run_critic_agent
 from agents.experiment_agent import run_experiment_agent
 from agents.method_agent import run_method_agent
 from agents.summary_agent import run_summary_agent
+from core.assessment import build_analysis_assessment
 from core.evidence import EvidenceSnippet, build_evidence_index, evidence_context_for_agent
 from core.pdf_parser import ParsedPaper
-from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
+from core.schemas import AnalysisAssessment, CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 
 
 class PaperState(TypedDict, total=False):
@@ -27,6 +28,7 @@ class PaperState(TypedDict, total=False):
 
     # Final output
     summary_output: SummaryOutput
+    assessment: AnalysisAssessment
 
 
 # --- Node functions ---
@@ -65,6 +67,20 @@ def summary_node(state: PaperState) -> dict:
     return {"summary_output": result}
 
 
+def assessment_node(state: PaperState) -> dict:
+    """Calculate transparent novelty and reliability scores after all agents finish."""
+    return {
+        "assessment": build_analysis_assessment(
+            state["parsed_paper"],
+            state["evidence_index"],
+            state["method_output"],
+            state["experiment_output"],
+            state["critic_output"],
+            state["summary_output"],
+        )
+    }
+
+
 # --- Build the graph ---
 
 def build_graph() -> StateGraph:
@@ -75,6 +91,7 @@ def build_graph() -> StateGraph:
     graph.add_node("experiment", experiment_node)
     graph.add_node("critic", critic_node)
     graph.add_node("summary", summary_node)
+    graph.add_node("assessment", assessment_node)
 
     # Evidence-first fan-out: START → evidence index → three parallel agents
     graph.add_edge(START, "evidence")
@@ -87,7 +104,8 @@ def build_graph() -> StateGraph:
     graph.add_edge("experiment", "summary")
     graph.add_edge("critic", "summary")
 
-    graph.add_edge("summary", END)
+    graph.add_edge("summary", "assessment")
+    graph.add_edge("assessment", END)
 
     return graph.compile()
 
