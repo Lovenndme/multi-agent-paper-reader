@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlertCircle,
   IconBook2,
@@ -18,10 +18,14 @@ import {
   IconListDetails,
   IconLoader2,
   IconMarkdown,
+  IconMessageCircle,
+  IconQuote,
   IconSearch,
+  IconSend,
   IconSettings,
   IconShare3,
   IconSparkles,
+  IconTrash,
   IconX,
 } from "@tabler/icons-react";
 import avatarUrl from "./assets/avatar.png";
@@ -728,6 +732,120 @@ function AppButton({ children, className = "", ...props }) {
   );
 }
 
+const chatContextKeys = [
+  "mode",
+  "paper",
+  "method_output",
+  "experiment_output",
+  "critic_output",
+  "summary_output",
+  "assessment",
+  "evidence_index",
+];
+
+function analysisContextForChat(data) {
+  return chatContextKeys.reduce((context, key) => {
+    if (data?.[key] !== undefined) context[key] = data[key];
+    return context;
+  }, {});
+}
+
+function PaperChatDrawer({
+  paperTitle,
+  messages,
+  input,
+  quote,
+  isStreaming,
+  onInputChange,
+  onClearQuote,
+  onSend,
+  onClose,
+  onClear,
+}) {
+  const textareaRef = useRef(null);
+  const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [quote]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages, isStreaming]);
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      if (input.trim() && !isStreaming) onSend();
+    }
+  }
+
+  return (
+    <section className="paper-chat-drawer" aria-label="论文追问">
+      <header className="chat-header">
+        <div>
+          <span><IconMessageCircle size={16} stroke={1.8} /> 论文追问</span>
+          <strong title={paperTitle}>{paperTitle}</strong>
+        </div>
+        <div className="chat-header-actions">
+          <button type="button" title="清空对话" aria-label="清空对话" onClick={onClear} disabled={!messages.length || isStreaming}>
+            <IconTrash size={17} stroke={1.8} />
+          </button>
+          <button type="button" title="关闭追问" aria-label="关闭追问" onClick={onClose}>
+            <IconX size={18} stroke={1.8} />
+          </button>
+        </div>
+      </header>
+
+      <div className="chat-messages">
+        {!messages.length && (
+          <div className="chat-empty">
+            <IconMessageCircle size={24} stroke={1.5} />
+            <strong>GLM-5.2</strong>
+          </div>
+        )}
+        {messages.map((message) => (
+          <article className={`chat-message ${message.role}${message.error ? " error" : ""}`} key={message.id}>
+            {message.quote && (
+              <blockquote><IconQuote size={14} stroke={1.8} /> {message.quote}</blockquote>
+            )}
+            {message.content ? (
+              <p>{message.content}</p>
+            ) : (
+              <span className="chat-typing" aria-label="正在生成"><i /><i /><i /></span>
+            )}
+          </article>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); onSend(); }}>
+        {quote && (
+          <div className="chat-quote-chip">
+            <IconQuote size={14} stroke={1.8} />
+            <span>{quote}</span>
+            <button type="button" aria-label="移除引用片段" onClick={onClearQuote}><IconX size={14} /></button>
+          </div>
+        )}
+        <div className="chat-input-row">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            maxLength={4000}
+            rows={2}
+            placeholder="继续追问这篇论文"
+            onChange={(event) => onInputChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <button className="chat-send" type="submit" aria-label="发送问题" disabled={!input.trim() || isStreaming}>
+            {isStreaming ? <IconLoader2 className="spin" size={18} /> : <IconSend size={18} stroke={1.9} />}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
 export function App() {
   const [activeTab, setActiveTab] = useState("概览");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -745,7 +863,18 @@ export function App() {
   const [agentStreams, setAgentStreams] = useState(emptyAgentStreams);
   const [streamMessage, setStreamMessage] = useState("已准备好开始分析");
   const [demoMode, setDemoMode] = useState(false);
+  const [selectionAction, setSelectionAction] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatQuote, setChatQuote] = useState("");
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatStreaming, setChatStreaming] = useState(false);
   const fileInputRef = useRef(null);
+  const resultsPanelRef = useRef(null);
+  const resultsScrollRef = useRef(null);
+  const chatAbortRef = useRef(null);
+
+  useEffect(() => () => chatAbortRef.current?.abort(), []);
 
   const displayedData = analysisData || sampleAnalysis;
   const displayedPaper = displayedData.paper;
@@ -846,7 +975,152 @@ export function App() {
     setAgentStreams(emptyAgentStreams);
     setStreamMessage("PDF 已选择，可以开始流式分析。");
     setAnalysisData(pendingAnalysisForFile(file));
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    setChatStreaming(false);
+    setSelectionAction(null);
+    setChatOpen(false);
+    setChatQuote("");
+    setChatInput("");
+    setChatMessages([]);
     showToast("PDF ready for analysis");
+  }
+
+  function handleResultSelection() {
+    window.requestAnimationFrame(() => {
+      const selection = window.getSelection();
+      const panel = resultsPanelRef.current;
+      const scroll = resultsScrollRef.current;
+      if (!selection || selection.isCollapsed || !selection.rangeCount || !panel || !scroll) {
+        setSelectionAction(null);
+        return;
+      }
+
+      const range = selection.getRangeAt(0);
+      const ancestor = range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+        ? range.commonAncestorContainer.parentElement
+        : range.commonAncestorContainer;
+      if (!ancestor || !scroll.contains(ancestor)) {
+        setSelectionAction(null);
+        return;
+      }
+
+      const text = selection.toString().replace(/\s+/g, " ").trim().slice(0, 4000);
+      if (text.length < 2) {
+        setSelectionAction(null);
+        return;
+      }
+
+      const rect = range.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const left = Math.min(Math.max(rect.left + rect.width / 2 - panelRect.left, 108), panelRect.width - 108);
+      let top = rect.top - panelRect.top - 44;
+      if (top < 58) top = rect.bottom - panelRect.top + 8;
+      setSelectionAction({ text, left, top });
+    });
+  }
+
+  function openChatFromSelection() {
+    if (!selectionAction?.text) return;
+    setChatQuote(selectionAction.text);
+    setChatOpen(true);
+    setSelectionAction(null);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  async function sendChatMessage() {
+    const question = chatInput.trim();
+    if (!question || chatStreaming) return;
+
+    const quote = chatQuote.trim();
+    const history = chatMessages
+      .filter((message) => message.content && !message.error)
+      .map(({ role, content, quote: messageQuote }) => ({
+        role,
+        content,
+        ...(messageQuote ? { quote: messageQuote } : {}),
+      }))
+      .slice(-16);
+    const userId = `user-${Date.now()}`;
+    const assistantId = `assistant-${Date.now()}`;
+    setChatMessages((previous) => [
+      ...previous,
+      { id: userId, role: "user", content: question, quote },
+      { id: assistantId, role: "assistant", content: "" },
+    ]);
+    setChatInput("");
+    setChatQuote("");
+    setChatStreaming(true);
+    const controller = new AbortController();
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = controller;
+
+    try {
+      const useDemoChat = demoMode || displayedData.mode !== "live";
+      const response = await fetch(`/api/chat/stream?demo=${useDemoChat ? "true" : "false"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          question,
+          selected_text: quote || null,
+          history,
+          context: analysisContextForChat(displayedData),
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `追问请求失败（HTTP ${response.status}）`);
+      }
+      if (!response.body) throw new Error("当前浏览器无法读取流式回答。");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let answer = "";
+      let completed = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.type === "error") throw new Error(event.message || "追问失败。");
+          if (event.type === "token") {
+            answer += event.text || "";
+            setChatMessages((previous) => previous.map((message) => (
+              message.id === assistantId ? { ...message, content: answer } : message
+            )));
+          }
+          if (event.type === "complete") completed = true;
+        }
+        if (done) break;
+      }
+
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer);
+        if (event.type === "error") throw new Error(event.message || "追问失败。");
+        if (event.type === "token") answer += event.text || "";
+        if (event.type === "complete") completed = true;
+      }
+      if (!completed || !answer.trim()) throw new Error("回答在完成前意外结束。");
+      setChatMessages((previous) => previous.map((message) => (
+        message.id === assistantId ? { ...message, content: answer } : message
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "追问失败。";
+      setChatMessages((previous) => previous.map((item) => (
+        item.id === assistantId ? { ...item, content: message, error: true } : item
+      )));
+    } finally {
+      if (chatAbortRef.current === controller) {
+        chatAbortRef.current = null;
+        setChatStreaming(false);
+      }
+    }
   }
 
   function applyStreamEvent(event) {
@@ -952,6 +1226,14 @@ export function App() {
     setAgentStreams(emptyAgentStreams);
     setStreamMessage("正在将 PDF 上传到后端..." );
     setAnalysisData(pendingAnalysisForFile(selectedFile));
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    setChatStreaming(false);
+    setSelectionAction(null);
+    setChatOpen(false);
+    setChatQuote("");
+    setChatInput("");
+    setChatMessages([]);
     showToast(demoMode ? "Demo analysis started" : "Live analysis started");
 
     const form = new FormData();
@@ -1238,20 +1520,26 @@ export function App() {
           </AppButton>
         </section>
 
-        <section className="results-panel glass">
+        <section className="results-panel glass" ref={resultsPanelRef}>
           <div className="tabs">
             {tabs.map((tab) => (
               <button
                 className={activeTab === tab ? "active" : ""}
                 key={tab}
                 type="button"
-                onClick={() => setActiveTab(tab)}
+                onClick={() => { setActiveTab(tab); setSelectionAction(null); }}
               >
                 {tab}
               </button>
             ))}
           </div>
-          <div className="results-scroll">
+          <div
+            className="results-scroll"
+            ref={resultsScrollRef}
+            onMouseUp={handleResultSelection}
+            onKeyUp={handleResultSelection}
+            onScroll={() => setSelectionAction(null)}
+          >
             <ResultContent
               activeTab={activeTab}
               data={displayedData}
@@ -1261,6 +1549,31 @@ export function App() {
               isAnalyzing={isAnalyzing}
             />
           </div>
+          {selectionAction && !chatOpen && (
+            <button
+              className="selection-chat-action"
+              type="button"
+              style={{ left: selectionAction.left, top: selectionAction.top }}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={openChatFromSelection}
+            >
+              <IconMessageCircle size={16} stroke={1.8} /> 在侧边聊天中提问
+            </button>
+          )}
+          {chatOpen && (
+            <PaperChatDrawer
+              paperTitle={displayedPaper.title || "当前论文"}
+              messages={chatMessages}
+              input={chatInput}
+              quote={chatQuote}
+              isStreaming={chatStreaming}
+              onInputChange={setChatInput}
+              onClearQuote={() => setChatQuote("")}
+              onSend={sendChatMessage}
+              onClose={() => setChatOpen(false)}
+              onClear={() => setChatMessages([])}
+            />
+          )}
         </section>
       </main>
 

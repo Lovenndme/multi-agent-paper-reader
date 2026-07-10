@@ -10,6 +10,7 @@ The repository includes a full-stack web app:
 - Frontend: `frontend-prototype/` with React + Vite
 - API: `POST /api/analyze` accepts a PDF upload and returns parsed paper metadata plus all agent outputs
 - Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
+- Follow-up API: `POST /api/chat/stream` streams analysis-grounded answers using the selected text, current Agent outputs, evidence previews, and recent conversation turns
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
 Run it locally:
@@ -83,6 +84,10 @@ Every completed API response includes an `assessment` object with two separate r
 - **Analysis reliability (0-100):** the backend deterministically scores PDF parsing (20), key-section coverage (35), valid evidence citations (30), and structured-output integrity (15).
 
 Reliability is not the model's self-reported confidence. Missing related-work coverage, fewer than three valid citations, insufficient parsed content, incomplete novelty dimensions, or Demo mode apply explicit score caps. The response exposes the component scores, raw score, cap, final score, and warnings so the result can be audited.
+
+## Follow-up Chat
+
+Select text inside the results panel and choose **在侧边聊天中提问** to open the paper chat drawer. A Live analysis continues with the configured `glm-5.2` model and sends bounded context from the current paper, Agent outputs, assessment, evidence previews, selected excerpt, and up to 16 recent conversation turns. Sample and Demo results use a deterministic reply so the complete interaction can be tested without another model call.
 
 See [CLAUDE.md](./CLAUDE.md) for the original architecture notes.
 

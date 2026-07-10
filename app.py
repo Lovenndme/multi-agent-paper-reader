@@ -23,6 +23,7 @@ from agents.experiment_agent import run_experiment_agent, stream_experiment_agen
 from agents.method_agent import run_method_agent, stream_method_agent
 from agents.summary_agent import run_summary_agent, stream_summary_agent
 from core.assessment import build_analysis_assessment
+from core.chat import PaperChatRequest, demo_chat_reply, stream_chat_reply
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
@@ -567,6 +568,25 @@ def _stream_analyze_response(
             yield from _stream_live_analysis(parsed, filename, len(data), pdf_path)
 
 
+def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[str]:
+    """Emit newline-delimited follow-up chat events."""
+    try:
+        if demo:
+            reply = demo_chat_reply(request)
+            for index in range(0, len(reply), 28):
+                yield _stream_event("token", text=reply[index : index + 28])
+                time.sleep(0.015)
+        else:
+            for token in stream_chat_reply(request):
+                yield _stream_event("token", text=token)
+        yield _stream_event(
+            "complete",
+            model=os.environ.get("MODEL_NAME", "glm-5.2"),
+        )
+    except Exception as exc:  # noqa: BLE001 - stream actionable chat errors
+        yield _stream_event("error", message=f"追问失败：{exc}")
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """Report whether the backend and live LLM configuration are available."""
@@ -651,6 +671,27 @@ async def analyze_paper_stream(
 
     return StreamingResponse(
         _stream_analyze_response(filename, data, demo=demo),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/chat/stream")
+def chat_with_paper(
+    request: PaperChatRequest,
+    demo: bool = Query(default=False, description="Return a deterministic demo reply."),
+) -> StreamingResponse:
+    """Continue the paper-reading conversation with analysis-grounded context."""
+    if not demo and not is_llm_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="GLM_API_KEY is not set. Enable Demo mode or configure the model key.",
+        )
+    return StreamingResponse(
+        _stream_chat_response(request, demo=demo),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
