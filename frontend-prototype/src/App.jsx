@@ -1170,6 +1170,21 @@ export function App() {
       return "";
     }
 
+    if (event.type === "section_titles_started") {
+      setStreamMessage(`正在将 ${event.count ?? "若干"} 个英文章节标题统一翻译为中文。`);
+      return "";
+    }
+
+    if (event.type === "section_titles_complete") {
+      setStreamMessage(`已翻译 ${event.translated ?? 0} 个自定义章节标题，正在整理论文结构。`);
+      return "";
+    }
+
+    if (event.type === "section_titles_error") {
+      setStreamMessage("部分自定义章节标题翻译失败，已继续使用本地中文词典处理。" );
+      return "";
+    }
+
     if (event.type === "vision_started") {
       setStreamMessage("正在渲染 PDF 图表并调用视觉模型生成 F 类证据。");
       return "";
@@ -1478,9 +1493,7 @@ export function App() {
                 >
                   <span className="chapter-index">{index + 1}</span>
                   <span className="chapter-copy">
-                    <strong title={chapter.title || chapter.display_title || ""}>
-                      {chapter.displayTitle || cleanChapterTitle(chapter, index)}
-                    </strong>
+                    <strong>{chapter.displayTitle || cleanChapterTitle(chapter, index)}</strong>
                     <small>{chapter.meta || chapterMeta(chapter)}</small>
                   </span>
                   <span className={`chapter-status ${chapter.status?.tone || "ready"}`}>

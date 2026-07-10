@@ -11,6 +11,7 @@ The repository includes a full-stack web app:
 - API: `POST /api/analyze` accepts a PDF upload and returns parsed paper metadata plus all agent outputs
 - Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
 - Follow-up API: `POST /api/chat/stream` streams analysis-grounded answers using the selected text, current Agent outputs, evidence previews, and recent conversation turns
+- Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded GLM batch before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
 Run it locally:

@@ -6,7 +6,6 @@ import os
 import tempfile
 import time
 import json
-import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Empty, Queue
@@ -27,6 +26,11 @@ from core.chat import PaperChatRequest, demo_chat_reply, stream_chat_reply
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
+from core.section_titles import (
+    clean_section_title,
+    section_titles_needing_translation,
+    translate_section_titles,
+)
 from core.vision import enrich_paper_figures_with_vision
 from utils.llm import is_llm_configured, is_vision_configured
 
@@ -55,101 +59,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SECTION_TITLE_TRANSLATIONS = {
-    "abstract": "摘要",
-    "introduction": "引言",
-    "related work": "相关工作",
-    "background": "研究背景",
-    "research background": "研究背景",
-    "motivation": "研究动机",
-    "preliminaries": "预备知识",
-    "problem formulation": "问题定义",
-    "method": "方法",
-    "methodology": "方法",
-    "model": "模型",
-    "retrieval model": "检索模型",
-    "approach": "方法",
-    "framework": "框架",
-    "architecture": "模型架构",
-    "model architecture": "模型架构",
-    "system": "系统设计",
-    "generator": "生成器",
-    "encoder and decoder stacks": "编码器与解码器堆栈",
-    "attention": "注意力机制",
-    "scaled dot-product attention": "缩放点积注意力",
-    "multi-head attention": "多头注意力",
-    "applications of attention in our model": "注意力在模型中的应用",
-    "position-wise feed-forward networks": "逐位置前馈网络",
-    "embeddings and softmax": "词嵌入与 Softmax",
-    "positional encoding": "位置编码",
-    "why self-attention": "为什么使用自注意力",
-    "experiment": "实验",
-    "experiments": "实验",
-    "experimental setup": "实验设置",
-    "experimental results": "实验结果",
-    "implementation details": "实现细节",
-    "hyperparameter settings": "超参数设置",
-    "comparison with state-of-the-art": "与先进方法对比",
-    "ablation": "消融实验",
-    "ablations": "消融实验",
-    "evaluation": "评估",
-    "results": "实验结果",
-    "training": "训练",
-    "training data and batching": "训练数据与批处理",
-    "hardware and schedule": "硬件与训练计划",
-    "optimizer": "优化器",
-    "regularization": "正则化",
-    "label smoothing": "标签平滑",
-    "machine translation": "机器翻译",
-    "model variations": "模型变体",
-    "english constituency parsing": "英语成分句法分析",
-    "discussion": "讨论",
-    "analysis": "分析",
-    "limitations": "局限性",
-    "future work": "未来工作",
-    "conclusion": "结论",
-    "conclusions": "结论",
-    "acknowledgments": "致谢",
-    "acknowledgements": "致谢",
-    "references": "参考文献",
-    "appendix": "附录",
-    "full paper": "全文",
-}
-
-
-def _clean_section_title(title: str, index: int) -> str:
-    cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
-    cleaned = re.sub(r"^[\d一二三四五六七八九十]+(?:[\.\d]*)[\.\、\s]+", "", cleaned)
-    normalized = cleaned.lower().strip(" .:-")
-
-    if normalized in SECTION_TITLE_TRANSLATIONS:
-        return SECTION_TITLE_TRANSLATIONS[normalized]
-    if normalized.startswith("appendix"):
-        return "附录"
-
-    letters = re.findall(r"[A-Za-z\u4e00-\u9fff]", cleaned)
-    symbols = re.findall(r"[^A-Za-z0-9\u4e00-\u9fff\s.\-:/&]", cleaned)
-    looks_noisy = (
-        not cleaned
-        or len(letters) < 2
-        or "\ufffd" in cleaned
-        or "�" in cleaned
-        or len(symbols) / max(len(cleaned), 1) > 0.16
-        or cleaned.startswith(("(", "[", "{"))
-    )
-    if looks_noisy:
-        return f"章节 {index + 1}"
-
-    if len(cleaned) > 46:
-        return f"{cleaned[:43].rstrip()}..."
-    return cleaned
-
-
-def _section_payload(paper: ParsedPaper) -> list[dict[str, Any]]:
+def _section_payload(
+    paper: ParsedPaper,
+    translated_titles: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     return [
         {
             "title": section.title,
-            "display_title": _clean_section_title(section.title, index),
+            "display_title": clean_section_title(section.title, index, translated_titles),
             "page_start": section.page_start,
             "page_end": section.page_end,
             "chars": len(section.content),
@@ -158,7 +75,12 @@ def _section_payload(paper: ParsedPaper) -> list[dict[str, Any]]:
     ]
 
 
-def _paper_payload(paper: ParsedPaper, filename: str, file_size: int) -> dict[str, Any]:
+def _paper_payload(
+    paper: ParsedPaper,
+    filename: str,
+    file_size: int,
+    translated_titles: dict[str, str] | None = None,
+) -> dict[str, Any]:
     page_count = max((section.page_end for section in paper.sections), default=-1) + 1
     return {
         "title": paper.title,
@@ -166,7 +88,7 @@ def _paper_payload(paper: ParsedPaper, filename: str, file_size: int) -> dict[st
         "size_bytes": file_size,
         "pages": page_count,
         "sections_count": len(paper.sections),
-        "sections": _section_payload(paper),
+        "sections": _section_payload(paper, translated_titles),
         "metadata": paper.metadata,
     }
 
@@ -392,7 +314,7 @@ def _stream_demo_analysis(
     filename: str,
     file_size: int,
 ) -> Iterable[str]:
-    paper_payload = _paper_payload(paper, filename, file_size)
+    paper_payload = _paper_payload(paper, filename, file_size, {})
     snippets = build_evidence_index(paper)
     index_payload = evidence_payload(snippets)
     outputs = _demo_outputs(paper)
@@ -438,7 +360,34 @@ def _stream_live_analysis(
     file_size: int,
     pdf_path: Path | None = None,
 ) -> Iterable[str]:
-    paper_payload = _paper_payload(paper, filename, file_size)
+    raw_titles = [section.title for section in paper.sections]
+    pending_titles = section_titles_needing_translation(raw_titles)
+    translated_titles: dict[str, str] = {}
+    if pending_titles:
+        yield _stream_event(
+            "section_titles_started",
+            count=len(pending_titles),
+            message="Translating section titles",
+        )
+        try:
+            translated_titles = translate_section_titles(raw_titles)
+            yield _stream_event(
+                "section_titles_complete",
+                translated=len(translated_titles),
+                message="Section titles translated",
+            )
+        except Exception as exc:  # noqa: BLE001 - title translation is non-critical
+            yield _stream_event(
+                "section_titles_error",
+                message=f"Section title translation skipped: {exc}",
+            )
+
+    paper_payload = _paper_payload(
+        paper,
+        filename,
+        file_size,
+        translated_titles,
+    )
     yield _stream_event("paper", mode="live", paper=paper_payload, message="PDF parsed")
     if pdf_path is not None:
         yield _stream_event(
@@ -650,6 +599,7 @@ async def analyze_paper(
         except Exception as exc:  # noqa: BLE001 - preserve useful parser details for UI
             raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
 
+        translated_titles: dict[str, str] = {}
         if demo:
             outputs = _demo_outputs(parsed)
             mode = "demo"
@@ -663,6 +613,12 @@ async def analyze_paper(
                     ),
                 )
             try:
+                translated_titles = translate_section_titles(
+                    [section.title for section in parsed.sections]
+                )
+            except Exception:
+                translated_titles = {}
+            try:
                 outputs = _live_outputs(parsed, pdf_path)
             except Exception as exc:  # noqa: BLE001 - return actionable UI error
                 raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
@@ -670,7 +626,7 @@ async def analyze_paper(
 
     return {
         "mode": mode,
-        "paper": _paper_payload(parsed, filename, len(data)),
+        "paper": _paper_payload(parsed, filename, len(data), translated_titles),
         **outputs,
     }
 
