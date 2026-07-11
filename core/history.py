@@ -138,6 +138,16 @@ def load_paper_analysis(history_id: str) -> dict[str, Any] | None:
     }
 
 
+def paper_history_exists(history_id: str) -> bool:
+    """Check one saved analysis without decoding its large JSON payloads."""
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM paper_history WHERE id = ?",
+            (history_id,),
+        ).fetchone()
+    return row is not None
+
+
 def delete_paper_history(history_id: str) -> bool:
     """Delete one saved analysis and its retained PDF."""
     with _HISTORY_LOCK, _connect() as connection:
@@ -162,6 +172,9 @@ def _connect() -> sqlite3.Connection:
     connection = sqlite3.connect(database_path, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 15000")
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS paper_history (
@@ -182,6 +195,11 @@ def _connect() -> sqlite3.Connection:
         """
     )
     return connection
+
+
+def history_database_connection() -> sqlite3.Connection:
+    """Return the shared history database connection for related persistence modules."""
+    return _connect()
 
 
 def _database_path() -> Path:

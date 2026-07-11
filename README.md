@@ -10,7 +10,8 @@ The repository includes a full-stack web app:
 - Frontend: `frontend-prototype/` with React + Vite
 - API: `POST /api/analyze` accepts a PDF upload and returns parsed paper metadata plus all agent outputs
 - Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
-- Follow-up API: `POST /api/chat/stream` accepts the completed analysis `analysis_id`, retrieves question-relevant full-text evidence, and streams a grounded answer with recent conversation turns
+- Follow-up API: `POST /api/chat/stream` combines recent turns, a compact long-term memory index, query-relevant topic memories, recalled older messages, and full-text paper evidence
+- Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
 - Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded GLM batch before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
@@ -38,7 +39,7 @@ Open:
 http://127.0.0.1:8000/
 ```
 
-For real LLM analysis, copy `.env.example` to `.env` and set `GLM_API_KEY`. The default provider is Zhipu GLM at `https://open.bigmodel.cn/api/paas/v4`, using `glm-5.2`. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`).
+For real LLM analysis, copy `.env.example` to `.env` and set `GLM_API_KEY`. The default provider is Zhipu GLM at `https://open.bigmodel.cn/api/paas/v4`, using `glm-5.2`. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`). `CHAT_INPUT_TOKEN_BUDGET` sets the conservative dynamic input budget used to balance evidence, recent turns, and long-term memory (default `48000`).
 
 For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and `VISION_MODEL_NAME=glm-5v-turbo` or another OpenAI-compatible vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
 
@@ -89,13 +90,17 @@ Reliability is not the model's self-reported confidence. Missing related-work co
 
 ## Follow-up Chat
 
-Open the paper chat directly from the AI button at the bottom-right of the results panel, or select text and choose **在侧边聊天中提问** to include that excerpt. Each completed Live analysis returns an opaque `analysis_id`; the backend keeps that analysis's complete `E`/`T`/`F` evidence snippets in a bounded four-hour in-memory cache. For every question it combines Chinese/English query terms, conversational context, Agent-cited evidence IDs, and section intent to retrieve the most relevant original snippets. The answer prompt treats original paper evidence as authoritative, cites evidence IDs and pages, and explicitly distinguishes paper facts, background knowledge, and inference.
+Open the paper chat directly from the AI button at the bottom-right of the results panel, or select text and choose **在侧边聊天中提问** to include that excerpt. Each paper can have multiple independent conversations, selectable from the chat header. Every original user and assistant message is stored in SQLite and restored after browser refreshes or backend restarts.
+
+The long-conversation design follows the public Claude Code memory pattern: a concise memory index is loaded on every turn, while detailed topic memories are recalled only when relevant. The latest six complete rounds remain verbatim. Once another six older rounds become eligible, a background GLM task compacts them into the memory index and topic records without deleting the original messages or delaying the current answer. Each question can additionally recall relevant older original messages. A dynamic token budget prioritizes the current question, selected excerpt, original paper evidence, recent turns, analysis context, memory, and external sources instead of relying on a fixed message-count cutoff.
+
+Each completed Live analysis returns an opaque `analysis_id`; the backend keeps that analysis's complete `E`/`T`/`F` evidence snippets in a bounded four-hour in-memory cache. For every question it combines Chinese/English query terms, conversational context, Agent-cited evidence IDs, and section intent to retrieve the most relevant original snippets. The answer prompt treats original paper evidence as authoritative, cites evidence IDs and pages, and explicitly distinguishes paper facts, background knowledge, memory, and inference.
 
 Questions that explicitly ask for recent work, related papers, or comparisons with other papers can also use Semantic Scholar title/abstract metadata. This lookup is optional and fails closed; `SEMANTIC_SCHOLAR_API_KEY` can be configured for a dedicated API quota. Sample and Demo results use a deterministic reply so the complete interaction can be tested without another model call. Live in-memory chat sessions are recreated from persisted full evidence whenever a saved paper is reopened.
 
 ## Paper History
 
-Every completed upload is saved locally in `.paper-reader/` by default. The SQLite record contains paper metadata, structured Agent outputs, assessment results, and complete evidence snippets; the original PDF is retained in `.paper-reader/papers/`. Uploading the same PDF again updates its existing history record instead of creating a duplicate. `Recent Papers` and the header History menu read this database, so a saved analysis can be reopened after a browser refresh or backend restart without uploading the PDF again. Reopening a Live result recreates its grounded follow-up chat session from the saved evidence.
+Every completed upload is saved locally in `.paper-reader/` by default. The SQLite database contains paper metadata, structured Agent outputs, assessment results, complete evidence snippets, chat conversations, immutable original messages, memory indexes, and topic memories; the original PDF is retained in `.paper-reader/papers/`. Uploading the same PDF again updates its existing history record instead of creating a duplicate. `Recent Papers` and the header History menu read this database, so a saved analysis and all of its conversations can be reopened after a browser refresh or backend restart without uploading the PDF again. Reopening a Live result recreates its grounded evidence session from the saved evidence.
 
 Set `PAPER_READER_DATA_DIR` to move all history storage, or set `PAPER_HISTORY_DB` to choose a specific SQLite path. Deleting an item from the History menu removes both its database record and retained PDF.
 

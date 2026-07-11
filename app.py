@@ -24,15 +24,29 @@ from agents.summary_agent import run_summary_agent, stream_summary_agent
 from core.assessment import build_analysis_assessment
 from core.chat import (
     PaperChatRequest,
+    build_chat_prompt,
     demo_chat_reply,
     store_analysis_session,
     stream_chat_reply,
+)
+from core.chat_memory import (
+    ConversationCreateRequest,
+    ConversationUpdateRequest,
+    add_conversation_message,
+    create_conversation,
+    delete_conversation,
+    get_conversation_summary,
+    list_conversations,
+    load_conversation,
+    rename_conversation,
+    schedule_memory_refresh,
 )
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.history import (
     delete_paper_history,
     list_paper_history,
     load_paper_analysis,
+    paper_history_exists,
     save_paper_analysis,
 )
 from core.pdf_parser import ParsedPaper, parse_pdf
@@ -601,21 +615,75 @@ def _stream_analyze_response(
 
 def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[str]:
     """Emit newline-delimited follow-up chat events."""
+    conversation_id: str | None = request.conversation_id
     try:
+        effective_request = request
+        prompt = None
+        user_message: dict[str, Any] | None = None
+        assistant_message: dict[str, Any] | None = None
+        answer_chunks: list[str] = []
+
+        if not demo and (request.conversation_id or request.history_id):
+            if request.conversation_id:
+                conversation = get_conversation_summary(request.conversation_id)
+                if request.history_id and conversation["history_id"] != request.history_id:
+                    raise ValueError("Conversation does not belong to the current paper.")
+            elif request.history_id:
+                conversation = create_conversation(request.history_id)
+            else:  # pragma: no cover - guarded by the outer condition
+                conversation = None
+            conversation_id = conversation["id"] if conversation else None
+            effective_request = request.model_copy(update={"conversation_id": conversation_id})
+            prompt = build_chat_prompt(effective_request)
+            user_message = add_conversation_message(
+                conversation_id,
+                role="user",
+                content=request.question,
+                quote=request.selected_text,
+            )
+
         if demo:
-            reply = demo_chat_reply(request)
+            reply = demo_chat_reply(effective_request)
             for index in range(0, len(reply), 28):
-                yield _stream_event("token", text=reply[index : index + 28])
+                token = reply[index : index + 28]
+                answer_chunks.append(token)
+                yield _stream_event("token", text=token)
                 time.sleep(0.015)
         else:
-            for token in stream_chat_reply(request):
+            for token in stream_chat_reply(
+                effective_request,
+                messages=prompt.messages if prompt else None,
+            ):
+                answer_chunks.append(token)
                 yield _stream_event("token", text=token)
+
+        if conversation_id and answer_chunks:
+            assistant_message = add_conversation_message(
+                conversation_id,
+                role="assistant",
+                content="".join(answer_chunks),
+            )
+            memory_refresh_scheduled = schedule_memory_refresh(conversation_id)
+            conversation = get_conversation_summary(conversation_id)
+        else:
+            memory_refresh_scheduled = False
+            conversation = None
         yield _stream_event(
             "complete",
             model=os.environ.get("MODEL_NAME", "glm-5.2"),
+            conversation_id=conversation_id,
+            conversation=conversation,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            memory_refresh_scheduled=memory_refresh_scheduled,
+            prompt_stats=prompt.stats.__dict__ if prompt else None,
         )
     except Exception as exc:  # noqa: BLE001 - stream actionable chat errors
-        yield _stream_event("error", message=f"追问失败：{exc}")
+        yield _stream_event(
+            "error",
+            message=f"追问失败：{exc}",
+            conversation_id=conversation_id,
+        )
 
 
 @app.get("/api/health")
@@ -637,6 +705,57 @@ def paper_history(
 ) -> dict[str, Any]:
     """List locally persisted paper analyses, newest first."""
     return {"items": list_paper_history(limit=limit)}
+
+
+@app.get("/api/history/{history_id}/conversations")
+def paper_chat_conversations(history_id: str) -> dict[str, Any]:
+    """List persisted follow-up conversations for one saved paper."""
+    if not paper_history_exists(history_id):
+        raise HTTPException(status_code=404, detail="Saved paper analysis was not found.")
+    return {"items": list_conversations(history_id)}
+
+
+@app.post("/api/history/{history_id}/conversations")
+def create_paper_chat_conversation(
+    history_id: str,
+    request: ConversationCreateRequest,
+) -> dict[str, Any]:
+    """Start an independent follow-up conversation for one paper."""
+    try:
+        return {"conversation": create_conversation(history_id, title=request.title)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+
+@app.get("/api/chat/conversations/{conversation_id}")
+def conversation_detail(conversation_id: str) -> dict[str, Any]:
+    """Restore complete original messages for one conversation."""
+    try:
+        return load_conversation(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+
+@app.patch("/api/chat/conversations/{conversation_id}")
+def update_conversation(
+    conversation_id: str,
+    request: ConversationUpdateRequest,
+) -> dict[str, Any]:
+    """Rename one follow-up conversation."""
+    try:
+        return {"conversation": rename_conversation(conversation_id, request.title)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+def remove_conversation(conversation_id: str) -> dict[str, bool]:
+    """Delete one conversation without affecting the saved paper."""
+    if not delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation was not found.")
+    return {"ok": True}
 
 
 @app.get("/api/history/{history_id}")

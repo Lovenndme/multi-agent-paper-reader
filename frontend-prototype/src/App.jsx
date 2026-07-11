@@ -21,6 +21,7 @@ import {
   IconLoader2,
   IconMarkdown,
   IconMessageCircle,
+  IconPlus,
   IconQuote,
   IconSearch,
   IconSend,
@@ -809,15 +810,20 @@ function analysisContextForChat(data) {
 
 function PaperChatDrawer({
   paperTitle,
+  conversations,
+  activeConversationId,
   messages,
   input,
   quote,
   isStreaming,
+  isConversationLoading,
   onInputChange,
   onClearQuote,
   onSend,
   onClose,
-  onClear,
+  onConversationChange,
+  onNewConversation,
+  onDeleteConversation,
 }) {
   const textareaRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -845,7 +851,13 @@ function PaperChatDrawer({
           <strong title={paperTitle}>{paperTitle}</strong>
         </div>
         <div className="chat-header-actions">
-          <button type="button" title="清空对话" aria-label="清空对话" onClick={onClear} disabled={!messages.length || isStreaming}>
+          <button
+            type="button"
+            title="删除当前对话"
+            aria-label="删除当前对话"
+            onClick={onDeleteConversation}
+            disabled={!activeConversationId || isStreaming || isConversationLoading}
+          >
             <IconTrash size={17} stroke={1.8} />
           </button>
           <button type="button" title="关闭追问" aria-label="关闭追问" onClick={onClose}>
@@ -854,8 +866,39 @@ function PaperChatDrawer({
         </div>
       </header>
 
+      <div className="chat-session-bar">
+        <select
+          aria-label="选择论文追问会话"
+          value={activeConversationId || ""}
+          onChange={(event) => onConversationChange(event.target.value)}
+          disabled={isStreaming || isConversationLoading}
+        >
+          <option value="">新对话</option>
+          {conversations.map((conversation) => (
+            <option value={conversation.id} key={conversation.id}>
+              {conversation.title}（{conversation.message_count}）
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          title="新建对话"
+          aria-label="新建对话"
+          onClick={onNewConversation}
+          disabled={isStreaming || isConversationLoading}
+        >
+          <IconPlus size={17} stroke={2} />
+        </button>
+      </div>
+
       <div className="chat-messages">
-        {!messages.length && (
+        {isConversationLoading && (
+          <div className="chat-empty">
+            <IconLoader2 className="spin" size={22} stroke={1.5} />
+            <strong>正在恢复对话</strong>
+          </div>
+        )}
+        {!isConversationLoading && !messages.length && (
           <div className="chat-empty">
             <IconMessageCircle size={24} stroke={1.5} />
             <strong>GLM-5.2</strong>
@@ -933,6 +976,9 @@ export function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
   const [chatStreaming, setChatStreaming] = useState(false);
+  const [chatConversations, setChatConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState("");
+  const [chatConversationLoading, setChatConversationLoading] = useState(false);
   const [historyItems, setHistoryItems] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
@@ -1050,6 +1096,116 @@ export function App() {
     }
   }
 
+  async function loadChatConversation(conversationId, { manageLoading = true } = {}) {
+    if (!conversationId) {
+      setActiveConversationId("");
+      setChatMessages([]);
+      return null;
+    }
+    if (manageLoading) setChatConversationLoading(true);
+    try {
+      const response = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Conversation restore failed（HTTP ${response.status}）`);
+      }
+      const payload = await response.json();
+      setActiveConversationId(payload.conversation?.id || conversationId);
+      setChatMessages(Array.isArray(payload.messages) ? payload.messages : []);
+      return payload;
+    } finally {
+      if (manageLoading) setChatConversationLoading(false);
+    }
+  }
+
+  async function loadChatConversations(historyId, preferredConversationId = "") {
+    if (!historyId) {
+      setChatConversations([]);
+      setActiveConversationId("");
+      setChatMessages([]);
+      return [];
+    }
+    setChatConversationLoading(true);
+    try {
+      const response = await fetch(`/api/history/${encodeURIComponent(historyId)}/conversations`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Conversation list failed（HTTP ${response.status}）`);
+      }
+      const payload = await response.json();
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      setChatConversations(items);
+      const targetId = preferredConversationId && items.some((item) => item.id === preferredConversationId)
+        ? preferredConversationId
+        : items[0]?.id || "";
+      if (targetId) {
+        await loadChatConversation(targetId, { manageLoading: false });
+      } else {
+        setActiveConversationId("");
+        setChatMessages([]);
+      }
+      return items;
+    } finally {
+      setChatConversationLoading(false);
+    }
+  }
+
+  function resetChatConversations() {
+    setChatConversations([]);
+    setActiveConversationId("");
+    setChatMessages([]);
+    setChatConversationLoading(false);
+  }
+
+  function startNewChatConversation() {
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    setChatStreaming(false);
+    setActiveConversationId("");
+    setChatMessages([]);
+    setChatInput("");
+  }
+
+  async function selectChatConversation(conversationId) {
+    if (!conversationId) {
+      startNewChatConversation();
+      return;
+    }
+    try {
+      await loadChatConversation(conversationId);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法恢复这段对话。" );
+    }
+  }
+
+  async function deleteActiveChatConversation() {
+    if (!activeConversationId || chatStreaming || chatConversationLoading) return;
+    const deletingId = activeConversationId;
+    setChatConversationLoading(true);
+    try {
+      const response = await fetch(`/api/chat/conversations/${encodeURIComponent(deletingId)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Conversation delete failed（HTTP ${response.status}）`);
+      }
+      const remaining = chatConversations.filter((item) => item.id !== deletingId);
+      setChatConversations(remaining);
+      if (remaining[0]?.id) {
+        await loadChatConversation(remaining[0].id, { manageLoading: false });
+      } else {
+        setActiveConversationId("");
+        setChatMessages([]);
+      }
+      showToast("对话已删除");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法删除对话。" );
+    } finally {
+      setChatConversationLoading(false);
+    }
+  }
+
   async function openHistoryPaper(item) {
     if (!item?.id || historyBusyId) return;
     setHistoryBusyId(item.id);
@@ -1075,7 +1231,7 @@ export function App() {
       setChatOpen(false);
       setChatQuote("");
       setChatInput("");
-      setChatMessages([]);
+      resetChatConversations();
       setChatStreaming(false);
       setHistoryOpen(false);
       setRecentOpen(true);
@@ -1105,7 +1261,7 @@ export function App() {
         setAgentStreams(emptyAgentStreams);
         setStreamMessage("已准备好开始分析");
         setChatOpen(false);
-        setChatMessages([]);
+        resetChatConversations();
       }
       await loadPaperHistory();
       showToast("历史论文已删除");
@@ -1137,7 +1293,7 @@ export function App() {
     setChatOpen(false);
     setChatQuote("");
     setChatInput("");
-    setChatMessages([]);
+    resetChatConversations();
     showToast("PDF ready for analysis");
   }
 
@@ -1175,19 +1331,29 @@ export function App() {
     });
   }
 
-  function openChatFromSelection() {
-    if (!selectionAction?.text) return;
-    setChatQuote(selectionAction.text);
+  async function openPaperChat(quote = "") {
+    setChatQuote(quote);
     setChatOpen(true);
     setSelectionAction(null);
     window.getSelection()?.removeAllRanges();
+    if (!displayedData.history_id) {
+      resetChatConversations();
+      return;
+    }
+    try {
+      await loadChatConversations(displayedData.history_id, activeConversationId);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法读取论文追问记录。" );
+    }
+  }
+
+  function openChatFromSelection() {
+    if (!selectionAction?.text) return;
+    void openPaperChat(selectionAction.text);
   }
 
   function openChatDirectly() {
-    setChatQuote("");
-    setChatOpen(true);
-    setSelectionAction(null);
-    window.getSelection()?.removeAllRanges();
+    void openPaperChat("");
   }
 
   async function sendChatMessage() {
@@ -1195,14 +1361,6 @@ export function App() {
     if (!question || chatStreaming) return;
 
     const quote = chatQuote.trim();
-    const history = chatMessages
-      .filter((message) => message.content && !message.error)
-      .map(({ role, content, quote: messageQuote }) => ({
-        role,
-        content,
-        ...(messageQuote ? { quote: messageQuote } : {}),
-      }))
-      .slice(-16);
     const userId = `user-${Date.now()}`;
     const assistantId = `assistant-${Date.now()}`;
     setChatMessages((previous) => [
@@ -1226,8 +1384,9 @@ export function App() {
         body: JSON.stringify({
           question,
           analysis_id: displayedData.analysis_id || null,
+          history_id: displayedData.history_id || null,
+          conversation_id: activeConversationId || null,
           selected_text: quote || null,
-          history,
           context: analysisContextForChat(displayedData),
         }),
       });
@@ -1242,6 +1401,24 @@ export function App() {
       let buffer = "";
       let answer = "";
       let completed = false;
+      let completionEvent = null;
+
+      function handleChatEvent(event) {
+        if (event.type === "error") {
+          if (event.conversation_id) setActiveConversationId(event.conversation_id);
+          throw new Error(event.message || "追问失败。");
+        }
+        if (event.type === "token") {
+          answer += event.text || "";
+          setChatMessages((previous) => previous.map((message) => (
+            message.id === assistantId ? { ...message, content: answer } : message
+          )));
+        }
+        if (event.type === "complete") {
+          completed = true;
+          completionEvent = event;
+        }
+      }
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1250,29 +1427,31 @@ export function App() {
         buffer = lines.pop() || "";
         for (const line of lines) {
           if (!line.trim()) continue;
-          const event = JSON.parse(line);
-          if (event.type === "error") throw new Error(event.message || "追问失败。");
-          if (event.type === "token") {
-            answer += event.text || "";
-            setChatMessages((previous) => previous.map((message) => (
-              message.id === assistantId ? { ...message, content: answer } : message
-            )));
-          }
-          if (event.type === "complete") completed = true;
+          handleChatEvent(JSON.parse(line));
         }
         if (done) break;
       }
 
       if (buffer.trim()) {
-        const event = JSON.parse(buffer);
-        if (event.type === "error") throw new Error(event.message || "追问失败。");
-        if (event.type === "token") answer += event.text || "";
-        if (event.type === "complete") completed = true;
+        handleChatEvent(JSON.parse(buffer));
       }
       if (!completed || !answer.trim()) throw new Error("回答在完成前意外结束。");
       setChatMessages((previous) => previous.map((message) => (
-        message.id === assistantId ? { ...message, content: answer } : message
+        message.id === userId && completionEvent?.user_message
+          ? completionEvent.user_message
+          : message.id === assistantId
+            ? completionEvent?.assistant_message || { ...message, content: answer }
+            : message
       )));
+      if (completionEvent?.conversation_id) {
+        setActiveConversationId(completionEvent.conversation_id);
+      }
+      if (completionEvent?.conversation) {
+        setChatConversations((previous) => [
+          completionEvent.conversation,
+          ...previous.filter((item) => item.id !== completionEvent.conversation.id),
+        ]);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "追问失败。";
       setChatMessages((previous) => previous.map((item) => (
@@ -1417,7 +1596,7 @@ export function App() {
     setChatOpen(false);
     setChatQuote("");
     setChatInput("");
-    setChatMessages([]);
+    resetChatConversations();
     showToast("Live analysis started");
 
     const form = new FormData();
@@ -1773,15 +1952,20 @@ export function App() {
           {chatOpen && (
             <PaperChatDrawer
               paperTitle={displayedPaper.title || "当前论文"}
+              conversations={chatConversations}
+              activeConversationId={activeConversationId}
               messages={chatMessages}
               input={chatInput}
               quote={chatQuote}
               isStreaming={chatStreaming}
+              isConversationLoading={chatConversationLoading}
               onInputChange={setChatInput}
               onClearQuote={() => setChatQuote("")}
               onSend={sendChatMessage}
               onClose={() => setChatOpen(false)}
-              onClear={() => setChatMessages([])}
+              onConversationChange={selectChatConversation}
+              onNewConversation={startNewChatConversation}
+              onDeleteConversation={deleteActiveChatConversation}
             />
           )}
         </section>

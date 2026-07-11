@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from core.chat_memory import ConversationMemoryDigest
 from core.schemas import ExperimentOutput
 from utils.llm import get_chat_llm, parse_structured_output, stream_structured_with_retry
 
@@ -96,6 +97,15 @@ class TestStructuredOutputParsing(unittest.TestCase):
 
         self.assertEqual(parsed.datasets, ["MATH-500", "AIME 2024", "GPQA Diamond"])
         self.assertIn("未按完整结构输出", parsed.main_results)
+
+    def test_accepts_memory_topic_list_as_provider_shape_fallback(self):
+        parsed = parse_structured_output(
+            '[{"topic":"多头注意力","content":"用户重点关注 E001 及其机制。"}]',
+            ConversationMemoryDigest,
+        )
+
+        self.assertEqual(parsed.topics[0].topic, "多头注意力")
+        self.assertIn("E001", parsed.summary)
 
     def test_stream_structured_output_repairs_wrong_top_level_shape(self):
         tokens = []

@@ -1,7 +1,9 @@
 """Tests for grounded paper follow-up chat context."""
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -9,11 +11,13 @@ from core.chat import (
     MAX_EVIDENCE_ITEMS,
     ChatHistoryTurn,
     PaperChatRequest,
+    build_chat_prompt,
     build_chat_messages,
     clear_analysis_sessions,
     compact_analysis_context,
     demo_chat_reply,
     get_analysis_session,
+    estimate_chat_tokens,
     retrieve_chat_evidence,
     store_analysis_session,
 )
@@ -216,6 +220,28 @@ class TestPaperChat(unittest.TestCase):
 
         self.assertIn(trailing_evidence, messages[0].content)
         self.assertIn("x" * 240, messages[0].content)
+
+    def test_dynamic_budget_bounds_large_recent_history(self):
+        request = PaperChatRequest(
+            question="请继续解释实验结论。",
+            history=[
+                ChatHistoryTurn(
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=("很长的历史内容" * 900)[:8_000],
+                    quote=("引用" * 2_000) if index % 2 == 0 else None,
+                )
+                for index in range(20)
+            ],
+            context={"paper": {"title": "Budget Test"}, "summary_output": {"notes": "摘要" * 20_000}},
+        )
+
+        with patch.dict(os.environ, {"CHAT_INPUT_TOKEN_BUDGET": "8000"}):
+            prompt = build_chat_prompt(request)
+
+        measured = sum(estimate_chat_tokens(message.content) for message in prompt.messages)
+        self.assertLessEqual(measured, prompt.stats.token_budget)
+        self.assertEqual(prompt.stats.estimated_input_tokens, measured)
+        self.assertLess(prompt.stats.recent_messages, 20)
 
 
 if __name__ == "__main__":
