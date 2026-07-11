@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlertCircle,
+  IconArrowDown,
   IconArrowsLeftRight,
   IconCheck,
   IconChevronRight,
@@ -18,6 +17,10 @@ import {
   IconTrash,
   IconX,
 } from "@tabler/icons-react";
+import { useChatAutoScroll } from "./useChatAutoScroll.js";
+
+const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
+const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
 
 const focusOptions = [
   { value: "comprehensive", label: "综合" },
@@ -39,11 +42,6 @@ const comparabilityLabels = {
   direct: "可直接比较",
   conditional: "需结合条件",
   not_comparable: "不宜直接比较",
-};
-
-const chatMarkdownComponents = {
-  a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
-  table: ({ children }) => <div className="chat-table-scroll"><table>{children}</table></div>,
 };
 
 function formatAge(value) {
@@ -377,6 +375,18 @@ export function ComparisonWorkspace({
     }
   }
 
+  async function refreshConversationList() {
+    if (!comparisonId) return;
+    try {
+      const response = await fetch(`/api/comparisons/${encodeURIComponent(comparisonId)}/conversations`);
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (Array.isArray(payload.items)) setConversations(payload.items);
+    } catch {
+      // Keep the immediate local title when background title refinement is unavailable.
+    }
+  }
+
   async function loadConversation(conversationId, manageLoading = true) {
     if (!conversationId) {
       setActiveConversationId("");
@@ -517,6 +527,11 @@ export function ComparisonWorkspace({
           complete.conversation,
           ...previous.filter((item) => item.id !== complete.conversation.id),
         ]);
+      }
+      if (complete.title_generation_scheduled) {
+        conversationTitleRefreshDelays.forEach((delay) => {
+          window.setTimeout(() => void refreshConversationList(), delay);
+        });
       }
     } catch (chatError) {
       if (chatError?.name === "AbortError") return;
@@ -884,13 +899,17 @@ function ComparisonChatDrawer({
   onRenameConversation,
 }) {
   const textareaRef = useRef(null);
-  const messagesEndRef = useRef(null);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
+  const {
+    containerRef: messagesContainerRef,
+    autoFollow,
+    handleScroll,
+    scrollToBottom,
+  } = useChatAutoScroll(messages, isStreaming, activeConversationId || "new");
 
   useEffect(() => { textareaRef.current?.focus(); }, [quote]);
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ block: "end" }); }, [messages, isStreaming]);
   useEffect(() => {
     setIsRenaming(false);
     setRenameValue(activeConversation?.title || "");
@@ -952,7 +971,7 @@ function ComparisonChatDrawer({
           </>
         )}
       </div>
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
         {isConversationLoading && <div className="chat-empty"><IconLoader2 className="spin" size={22} /><strong>正在恢复对话</strong></div>}
         {!isConversationLoading && !messages.length && <div className="chat-empty"><IconArrowsLeftRight size={24} /><strong>GLM-5.2</strong></div>}
         {messages.map((message) => (
@@ -960,13 +979,25 @@ function ComparisonChatDrawer({
             {message.quote && <blockquote><IconQuote size={14} /> {message.quote}</blockquote>}
             {message.content ? (
               message.role === "assistant" ? (
-                <ReactMarkdown components={chatMarkdownComponents} remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                <Suspense fallback={<p>{message.content}</p>}>
+                  <ChatMarkdown>{message.content}</ChatMarkdown>
+                </Suspense>
               ) : <p>{message.content}</p>
             ) : <span className="chat-typing"><i /><i /><i /></span>}
           </article>
         ))}
-        <div ref={messagesEndRef} />
       </div>
+      {!autoFollow && (
+        <button
+          className="chat-scroll-to-bottom"
+          type="button"
+          title="回到最新回答"
+          aria-label="回到最新回答"
+          onClick={() => scrollToBottom("smooth")}
+        >
+          <IconArrowDown size={17} stroke={2} />
+        </button>
+      )}
       <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); onSend(); }}>
         {quote && (
           <div className="chat-quote-chip"><IconQuote size={14} /><span>{quote}</span><button type="button" onClick={onClearQuote}><IconX size={14} /></button></div>

@@ -96,6 +96,8 @@ def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonCh
         "- 每项论文事实紧邻标注来源，例如 [P1:E003, p.4]。\n"
         "- 不得捏造数字、页码、证据 ID、实验条件或文献关系。\n"
         "- 可以给条件化建议，但不得在不可比结果上宣布绝对赢家。\n"
+        "- 数学变量和公式使用标准 LaTeX：行内公式写成 $o_1$，独立公式写成 $$...$$；不要放进代码块。\n"
+        "- 首次出现的变量必须解释其含义，避免只展示无法理解的符号。\n"
         "- 默认使用清晰、具体的简体中文；表格适合时可使用 Markdown 表格。\n"
         "</answer_rules>"
     )

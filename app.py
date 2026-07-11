@@ -40,6 +40,7 @@ from core.chat_memory import (
     list_conversations,
     load_conversation,
     rename_conversation,
+    schedule_conversation_title,
     schedule_memory_refresh,
 )
 from core.comparison import (
@@ -71,6 +72,7 @@ from core.comparison_history import (
     load_comparison_conversation,
     rename_comparison_conversation,
     save_comparison,
+    schedule_comparison_conversation_title,
 )
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.history import (
@@ -695,9 +697,19 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 content="".join(answer_chunks),
             )
             memory_refresh_scheduled = schedule_memory_refresh(conversation_id)
+            title_generation_scheduled = bool(
+                user_message
+                and user_message.get("title_generation_eligible")
+                and schedule_conversation_title(
+                    conversation_id,
+                    request.question,
+                    expected_title=str(user_message.get("provisional_title") or ""),
+                )
+            )
             conversation = get_conversation_summary(conversation_id)
         else:
             memory_refresh_scheduled = False
+            title_generation_scheduled = False
             conversation = None
         yield _stream_event(
             "complete",
@@ -707,6 +719,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
             user_message=user_message,
             assistant_message=assistant_message,
             memory_refresh_scheduled=memory_refresh_scheduled,
+            title_generation_scheduled=title_generation_scheduled,
             prompt_stats=prompt.stats.__dict__ if prompt else None,
         )
     except Exception as exc:  # noqa: BLE001 - stream actionable chat errors
@@ -828,6 +841,15 @@ def _stream_comparison_chat_response(
             role="assistant",
             content="".join(answer_chunks),
         )
+        title_generation_scheduled = bool(
+            not demo
+            and user_message.get("title_generation_eligible")
+            and schedule_comparison_conversation_title(
+                conversation_id,
+                request.question,
+                expected_title=str(user_message.get("provisional_title") or ""),
+            )
+        )
         yield _stream_event(
             "complete",
             model=os.environ.get("MODEL_NAME", "glm-5.2"),
@@ -835,6 +857,7 @@ def _stream_comparison_chat_response(
             conversation=get_comparison_conversation_summary(conversation_id),
             user_message=user_message,
             assistant_message=assistant_message,
+            title_generation_scheduled=title_generation_scheduled,
             prompt_stats=prompt.stats.__dict__ if prompt else None,
         )
     except Exception as exc:  # noqa: BLE001 - stream actionable comparison chat errors

@@ -15,6 +15,7 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.conversation_titles import generate_conversation_title, local_conversation_title
 from core.history import history_database_connection
 from utils.llm import get_chat_llm, invoke_with_retry, parse_structured_output
 
@@ -171,6 +172,39 @@ def rename_conversation(conversation_id: str, title: str) -> dict[str, Any]:
     return get_conversation_summary(conversation_id)
 
 
+def schedule_conversation_title(
+    conversation_id: str,
+    question: str,
+    *,
+    expected_title: str,
+) -> bool:
+    """Refine an automatic first-question title without blocking the answer stream."""
+    if not expected_title:
+        return False
+
+    def run() -> None:
+        generated = generate_conversation_title(question)
+        if not generated or generated == expected_title:
+            return
+        with history_database_connection() as connection:
+            _ensure_schema(connection)
+            connection.execute(
+                """
+                UPDATE chat_conversations
+                SET title = ?, updated_at = ?
+                WHERE id = ? AND title = ?
+                """,
+                (generated, _utc_now(), conversation_id, expected_title),
+            )
+
+    threading.Thread(
+        target=run,
+        name=f"paper-chat-title-{conversation_id[:8]}",
+        daemon=True,
+    ).start()
+    return True
+
+
 def delete_conversation(conversation_id: str) -> bool:
     """Delete one conversation, its messages, and topic memories."""
     with history_database_connection() as connection:
@@ -217,8 +251,10 @@ def add_conversation_message(
             (message_id, conversation_id, role, clean_content, quote or None, sequence, now),
         )
         title = str(conversation["title"])
+        title_generation_eligible = False
         if role == "user" and sequence == 1 and title == "新对话":
-            title = _title_from_question(clean_content)
+            title = local_conversation_title(clean_content)
+            title_generation_eligible = True
         connection.execute(
             "UPDATE chat_conversations SET title = ?, updated_at = ? WHERE id = ?",
             (title, now, conversation_id),
@@ -230,6 +266,8 @@ def add_conversation_message(
         "quote": quote or None,
         "sequence": sequence,
         "created_at": now,
+        "title_generation_eligible": title_generation_eligible,
+        "provisional_title": title if title_generation_eligible else None,
     }
 
 
@@ -636,13 +674,6 @@ def _topic_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _clean_title(value: str | None) -> str:
     return " ".join((value or "").split())[:80]
-
-
-def _title_from_question(question: str) -> str:
-    title = _clean_title(question)
-    if len(title) <= 28:
-        return title
-    return title[:27].rstrip() + "…"
 
 
 def _utc_now() -> str:

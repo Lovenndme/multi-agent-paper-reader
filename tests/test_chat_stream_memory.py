@@ -68,6 +68,7 @@ class TestChatStreamMemory(unittest.TestCase):
         with (
             patch("app.build_chat_prompt", return_value=fake_prompt),
             patch("app.stream_chat_reply", return_value=iter(["因为", "证据充分。"])),
+            patch("app.schedule_conversation_title", return_value=True),
         ):
             events = [json.loads(line) for line in _stream_chat_response(request, demo=False)]
 
@@ -81,6 +82,7 @@ class TestChatStreamMemory(unittest.TestCase):
         self.assertEqual(restored["messages"][0]["quote"], "方法片段")
         self.assertEqual(restored["messages"][1]["content"], "因为证据充分。")
         self.assertEqual(complete["conversation"]["message_count"], 2)
+        self.assertTrue(complete["title_generation_scheduled"])
 
 
 if __name__ == "__main__":
