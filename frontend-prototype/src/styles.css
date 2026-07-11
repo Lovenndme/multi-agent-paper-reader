@@ -2061,6 +2061,399 @@ button {
   cursor: pointer;
 }
 
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(18, 39, 59, 0.24);
+  backdrop-filter: blur(9px);
+}
+
+.settings-dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: hidden auto;
+  border-radius: 8px;
+  color: #15304a;
+  animation: toast-in 180ms ease both;
+}
+
+.settings-dialog-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 15px;
+  border-bottom: 1px solid rgba(78, 111, 142, 0.14);
+  background: rgba(246, 251, 255, 0.9);
+  backdrop-filter: blur(18px);
+}
+
+.settings-dialog-header > div,
+.settings-dialog-header > div > div {
+  display: flex;
+  align-items: center;
+}
+
+.settings-dialog-header > div {
+  gap: 10px;
+}
+
+.settings-dialog-header > div > div {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.settings-title-icon,
+.settings-dialog-header > button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 8px;
+}
+
+.settings-title-icon {
+  background: rgba(220, 237, 255, 0.88);
+  color: #0874ef;
+}
+
+.settings-dialog-header strong {
+  font-size: 15px;
+}
+
+.settings-dialog-header small {
+  margin-top: 1px;
+  color: rgba(41, 68, 93, 0.56);
+  font-size: 10.5px;
+}
+
+.settings-dialog-header > button {
+  border: 0;
+  background: transparent;
+  color: #425f79;
+  cursor: pointer;
+}
+
+.settings-dialog-header > button:hover {
+  background: rgba(219, 234, 248, 0.7);
+  color: #0b6fd8;
+}
+
+.settings-dialog-header > button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.settings-content {
+  padding: 0 20px 20px;
+}
+
+.settings-meta-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid rgba(78, 111, 142, 0.14);
+}
+
+.settings-meta-row > div {
+  display: flex;
+  min-height: 72px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 12px;
+}
+
+.settings-meta-row > div + div {
+  border-left: 1px solid rgba(78, 111, 142, 0.14);
+}
+
+.settings-meta-row small,
+.settings-section > header small {
+  color: rgba(42, 68, 92, 0.56);
+  font-size: 10.5px;
+}
+
+.settings-meta-row strong {
+  color: #0c6fdf;
+  font-size: 19px;
+}
+
+.settings-meta-row span,
+.model-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.settings-meta-row span i,
+.model-state i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e7a23a;
+  box-shadow: 0 0 0 4px rgba(231, 162, 58, 0.12);
+}
+
+.settings-meta-row span.configured,
+.model-state.configured {
+  color: #16885c;
+}
+
+.settings-meta-row span.configured i,
+.model-state.configured i {
+  background: #1daf72;
+  box-shadow: 0 0 0 4px rgba(29, 175, 114, 0.12);
+}
+
+.settings-meta-row span.unconfigured,
+.model-state.unconfigured {
+  color: #a66c18;
+}
+
+.settings-section {
+  padding-top: 18px;
+}
+
+.settings-section + .settings-section {
+  margin-top: 18px;
+  border-top: 1px solid rgba(78, 111, 142, 0.14);
+}
+
+.settings-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 9px;
+}
+
+.settings-section h3 {
+  margin: 0;
+  color: #15304a;
+  font-size: 12.5px;
+}
+
+.settings-model-list {
+  border-block: 1px solid rgba(78, 111, 142, 0.13);
+}
+
+.settings-model-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto 64px;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 8px 4px;
+}
+
+.settings-model-row + .settings-model-row {
+  border-top: 1px solid rgba(78, 111, 142, 0.12);
+}
+
+.model-kind {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(217, 237, 255, 0.82);
+  color: #0874ef;
+}
+
+.model-kind.vision {
+  background: rgba(235, 226, 255, 0.78);
+  color: #7258dd;
+}
+
+.settings-model-row > div strong,
+.settings-model-row > div small {
+  display: block;
+}
+
+.settings-model-row > div strong {
+  font-size: 11.5px;
+}
+
+.settings-model-row > div small {
+  margin-top: 3px;
+  color: rgba(43, 69, 93, 0.56);
+  font-size: 10px;
+}
+
+.settings-model-row code {
+  color: #244966;
+  font-size: 11px;
+}
+
+.model-state {
+  justify-self: end;
+  font-size: 10.5px;
+}
+
+.api-key-section > header a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #0874df;
+  font-size: 10.5px;
+  text-decoration: none;
+}
+
+.api-key-section form > label {
+  display: block;
+  margin-bottom: 6px;
+  color: rgba(34, 59, 83, 0.72);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.settings-key-input {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 7px 0 12px;
+  border: 1px solid rgba(77, 111, 143, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: rgba(36, 65, 91, 0.56);
+}
+
+.settings-key-input:focus-within {
+  border-color: rgba(8, 116, 255, 0.48);
+  box-shadow: 0 0 0 3px rgba(8, 116, 255, 0.08);
+  color: #0874ef;
+}
+
+.settings-key-input input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #15304a;
+  font-size: 12px;
+}
+
+.settings-key-input input::placeholder {
+  color: rgba(40, 66, 90, 0.38);
+}
+
+.settings-key-input > button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #49657e;
+  cursor: pointer;
+}
+
+.settings-key-input > button:hover:not(:disabled) {
+  background: rgba(219, 235, 250, 0.72);
+  color: #0874df;
+}
+
+.settings-key-input > button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.settings-key-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 9px;
+}
+
+.settings-key-footer small {
+  color: rgba(41, 68, 92, 0.56);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.settings-key-footer small code {
+  color: #315a7d;
+}
+
+.settings-key-footer > button {
+  display: inline-flex;
+  min-width: 124px;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 8px;
+  background: #1677ee;
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.settings-key-footer > button:hover:not(:disabled) {
+  background: #0868d8;
+}
+
+.settings-key-footer > button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.settings-feedback,
+.settings-load-error,
+.settings-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #36546f;
+  font-size: 11px;
+}
+
+.settings-feedback {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(78, 111, 142, 0.12);
+}
+
+.settings-feedback.success {
+  color: #16885c;
+}
+
+.settings-feedback.error,
+.settings-load-error {
+  color: #b44842;
+}
+
+.settings-loading,
+.settings-load-error {
+  min-height: 220px;
+  justify-content: center;
+  padding: 24px;
+}
+
+.settings-load-error {
+  flex-wrap: wrap;
+}
+
+.settings-load-error button {
+  border: 0;
+  background: transparent;
+  color: #0874df;
+  cursor: pointer;
+}
+
 .toast {
   position: fixed;
   right: 34px;
@@ -2165,6 +2558,12 @@ button {
   .results-panel {
     grid-column: 1 / -1;
     min-height: 680px;
+  }
+}
+
+@media (max-width: 1360px) {
+  .top-actions {
+    gap: 13px;
   }
 }
 
@@ -2327,6 +2726,50 @@ button {
 }
 
 @media (max-width: 520px) {
+  .settings-backdrop {
+    padding: 10px;
+  }
+
+  .settings-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .settings-dialog-header,
+  .settings-content {
+    padding-inline: 14px;
+  }
+
+  .settings-meta-row {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-meta-row > div + div {
+    border-top: 1px solid rgba(78, 111, 142, 0.14);
+    border-left: 0;
+  }
+
+  .settings-model-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
+
+  .settings-model-row code {
+    grid-column: 2 / -1;
+  }
+
+  .model-state {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .settings-key-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-key-footer > button {
+    width: 100%;
+  }
+
   .score-grid {
     grid-template-columns: 1fr;
     gap: 20px;

@@ -89,6 +89,13 @@ from core.section_titles import (
     section_titles_needing_translation,
     translate_section_titles,
 )
+from core.settings import (
+    PROJECT_VERSION,
+    ApiKeySettingsRequest,
+    ApiKeyValidationError,
+    application_settings_payload,
+    configure_glm_api_key,
+)
 from core.vision import enrich_paper_figures_with_vision
 from utils.llm import is_llm_configured, is_vision_configured
 
@@ -101,7 +108,7 @@ load_dotenv(ROOT / ".env", override=False)
 app = FastAPI(
     title="Multi-Agent Paper Reader",
     description="Upload a paper PDF and generate structured multi-agent reading notes.",
-    version="0.1.0",
+    version=PROJECT_VERSION,
 )
 
 app.add_middleware(
@@ -873,12 +880,29 @@ def health() -> dict[str, Any]:
     """Report whether the backend and live LLM configuration are available."""
     return {
         "ok": True,
+        "version": PROJECT_VERSION,
         "frontend_dist": FRONTEND_DIST.exists(),
         "llm_configured": is_llm_configured(),
         "model": os.environ.get("MODEL_NAME", "glm-5.2"),
         "vision_configured": is_vision_configured(),
         "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
     }
+
+
+@app.get("/api/settings")
+def application_settings() -> dict[str, Any]:
+    """Return public model and version information for the settings dialog."""
+    return application_settings_payload()
+
+
+@app.post("/api/settings/api-key")
+def update_application_api_key(request: ApiKeySettingsRequest) -> dict[str, Any]:
+    """Validate and persist a GLM key without ever returning the secret."""
+    try:
+        settings = configure_glm_api_key(request.api_key.get_secret_value())
+    except ApiKeyValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "settings": settings}
 
 
 @app.get("/api/comparisons")

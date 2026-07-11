@@ -11,21 +11,29 @@ import {
   IconClock,
   IconCloudUpload,
   IconCopy,
+  IconCpu,
   IconDownload,
+  IconExternalLink,
+  IconEye,
+  IconEyeOff,
   IconFileAnalytics,
   IconFileDescription,
   IconFileTypePdf,
   IconHistory,
+  IconKey,
   IconListDetails,
   IconLoader2,
   IconMarkdown,
   IconMessageCircle,
   IconPencil,
   IconPlus,
+  IconPhoto,
   IconQuote,
   IconSearch,
   IconSend,
+  IconSettings,
   IconShare3,
+  IconShieldCheck,
   IconSparkles,
   IconTrash,
   IconX,
@@ -1035,6 +1043,153 @@ function PaperChatDrawer({
   );
 }
 
+function SettingsDialog({
+  status,
+  loading,
+  error,
+  apiKey,
+  apiKeyVisible,
+  saving,
+  feedback,
+  onApiKeyChange,
+  onToggleApiKey,
+  onSave,
+  onRetry,
+  onClose,
+}) {
+  return (
+    <div
+      className="settings-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+    >
+      <section
+        className="settings-dialog glass"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+      >
+        <header className="settings-dialog-header">
+          <div>
+            <span className="settings-title-icon"><IconSettings size={19} stroke={1.8} /></span>
+            <div>
+              <strong id="settings-dialog-title">Settings</strong>
+              <small>应用配置</small>
+            </div>
+          </div>
+          <button type="button" title="关闭设置" aria-label="关闭设置" onClick={onClose} disabled={saving}>
+            <IconX size={19} stroke={1.8} />
+          </button>
+        </header>
+
+        {loading && (
+          <div className="settings-loading">
+            <IconLoader2 className="spin" size={22} />
+            <span>正在读取配置</span>
+          </div>
+        )}
+
+        {!loading && error && (
+          <div className="settings-load-error">
+            <IconAlertCircle size={19} />
+            <span>{error}</span>
+            <button type="button" onClick={onRetry}>重新加载</button>
+          </div>
+        )}
+
+        {!loading && !error && status && (
+          <div className="settings-content">
+            <div className="settings-meta-row">
+              <div>
+                <small>项目版本</small>
+                <strong>{status.version || "V1.0"}</strong>
+              </div>
+              <div>
+                <small>模型服务</small>
+                <span className={status.api_key_configured ? "configured" : "unconfigured"}>
+                  <i /> {status.api_key_configured ? "已配置" : "待配置"}
+                </span>
+              </div>
+            </div>
+
+            <section className="settings-section">
+              <header>
+                <h3>当前模型</h3>
+                <small>{status.provider}</small>
+              </header>
+              <div className="settings-model-list">
+                {(status.models || []).map((model) => (
+                  <div className="settings-model-row" key={model.id}>
+                    <span className={`model-kind ${model.id}`}>
+                      {model.id === "vision" ? <IconPhoto size={18} /> : <IconCpu size={18} />}
+                    </span>
+                    <div>
+                      <strong>{model.label}</strong>
+                      <small>{model.purpose}</small>
+                    </div>
+                    <code>{model.name}</code>
+                    <span className={`model-state ${model.configured ? "configured" : "unconfigured"}`}>
+                      <i /> {model.configured ? "已配置" : "未配置"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="settings-section api-key-section">
+              <header>
+                <h3>GLM API Key</h3>
+                <a href="https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank" rel="noreferrer">
+                  获取 Key <IconExternalLink size={13} />
+                </a>
+              </header>
+              <form onSubmit={onSave}>
+                <label htmlFor="settings-api-key">API Key</label>
+                <div className="settings-key-input">
+                  <IconKey size={17} stroke={1.8} />
+                  <input
+                    id="settings-api-key"
+                    type={apiKeyVisible ? "text" : "password"}
+                    value={apiKey}
+                    autoComplete="off"
+                    spellCheck="false"
+                    placeholder={status.api_key_configured ? "粘贴新的 Key 以替换当前配置" : "粘贴智谱 GLM API Key"}
+                    onChange={(event) => onApiKeyChange(event.target.value)}
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    title={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                    aria-label={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                    onClick={onToggleApiKey}
+                    disabled={!apiKey || saving}
+                  >
+                    {apiKeyVisible ? <IconEyeOff size={17} /> : <IconEye size={17} />}
+                  </button>
+                </div>
+                <div className="settings-key-footer">
+                  <small>仅写入本机 <code>.env</code>，保存后不会回显。</small>
+                  <button type="submit" disabled={apiKey.trim().length < 10 || saving}>
+                    {saving ? <IconLoader2 className="spin" size={16} /> : <IconShieldCheck size={16} />}
+                    {saving ? "正在验证" : "验证并保存"}
+                  </button>
+                </div>
+                {feedback?.message && (
+                  <div className={`settings-feedback ${feedback.tone}`} role="status">
+                    {feedback.tone === "success" ? <IconCheck size={16} /> : <IconAlertCircle size={16} />}
+                    <span>{feedback.message}</span>
+                  </div>
+                )}
+              </form>
+            </section>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 export function App() {
   const [workspaceMode, setWorkspaceMode] = useState("reading");
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
@@ -1042,6 +1197,14 @@ export function App() {
   const [activeTab, setActiveTab] = useState("概览");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsApiKey, setSettingsApiKey] = useState("");
+  const [settingsApiKeyVisible, setSettingsApiKeyVisible] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsFeedback, setSettingsFeedback] = useState(null);
   const [chaptersOpen, setChaptersOpen] = useState(true);
   const [recentOpen, setRecentOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -1076,6 +1239,15 @@ export function App() {
     void loadPaperHistory();
     return () => chatAbortRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (!settingsOpen) return undefined;
+    function closeSettingsWithKeyboard(event) {
+      if (event.key === "Escape" && !settingsSaving) setSettingsOpen(false);
+    }
+    document.addEventListener("keydown", closeSettingsWithKeyboard);
+    return () => document.removeEventListener("keydown", closeSettingsWithKeyboard);
+  }, [settingsOpen, settingsSaving]);
 
   useEffect(() => {
     function closeWorkspaceMenu(event) {
@@ -1178,6 +1350,66 @@ export function App() {
   function showToast(message) {
     setToast(message);
     window.setTimeout(() => setToast(""), 2200);
+  }
+
+  async function loadApplicationSettings() {
+    setSettingsLoading(true);
+    setSettingsError("");
+    try {
+      const response = await fetch("/api/settings");
+      if (!response.ok) throw new Error(`Settings request failed（HTTP ${response.status}）`);
+      setSettingsStatus(await response.json());
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "无法读取应用配置。");
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
+
+  function openApplicationSettings() {
+    setHistoryOpen(false);
+    setWorkspaceMenuOpen(false);
+    setSettingsApiKey("");
+    setSettingsApiKeyVisible(false);
+    setSettingsFeedback(null);
+    setSettingsOpen(true);
+    void loadApplicationSettings();
+  }
+
+  function closeApplicationSettings() {
+    if (settingsSaving) return;
+    setSettingsOpen(false);
+    setSettingsApiKey("");
+    setSettingsApiKeyVisible(false);
+    setSettingsFeedback(null);
+  }
+
+  async function saveApplicationApiKey(event) {
+    event.preventDefault();
+    const apiKey = settingsApiKey.trim();
+    if (apiKey.length < 10 || settingsSaving) return;
+    setSettingsSaving(true);
+    setSettingsFeedback(null);
+    try {
+      const response = await fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `API Key 保存失败（HTTP ${response.status}）`);
+      setSettingsStatus(payload.settings);
+      setSettingsApiKey("");
+      setSettingsApiKeyVisible(false);
+      setSettingsFeedback({ tone: "success", message: "API Key 已验证并保存，模型服务现已可用。" });
+    } catch (error) {
+      setSettingsFeedback({
+        tone: "error",
+        message: error instanceof Error ? error.message : "API Key 验证失败。",
+      });
+    } finally {
+      setSettingsSaving(false);
+    }
   }
 
   async function loadPaperHistory() {
@@ -1938,6 +2170,9 @@ export function App() {
               </button>
             </div>
           </div>
+          <button type="button" onClick={openApplicationSettings}>
+            <IconSettings size={18} stroke={1.8} /> Settings
+          </button>
           <img src={avatarUrl} alt="Researcher profile" className="avatar" />
           <IconChevronDown size={16} stroke={1.7} />
         </nav>
@@ -2181,6 +2416,26 @@ export function App() {
           )}
         </section>
       </main>
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          status={settingsStatus}
+          loading={settingsLoading}
+          error={settingsError}
+          apiKey={settingsApiKey}
+          apiKeyVisible={settingsApiKeyVisible}
+          saving={settingsSaving}
+          feedback={settingsFeedback}
+          onApiKeyChange={(value) => {
+            setSettingsApiKey(value);
+            if (settingsFeedback) setSettingsFeedback(null);
+          }}
+          onToggleApiKey={() => setSettingsApiKeyVisible((value) => !value)}
+          onSave={saveApplicationApiKey}
+          onRetry={() => void loadApplicationSettings()}
+          onClose={closeApplicationSettings}
+        />
       )}
 
       {historyOpen && (

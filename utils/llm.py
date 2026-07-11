@@ -116,6 +116,13 @@ def is_vision_configured() -> bool:
     )
 
 
+def reset_llm_clients() -> None:
+    """Discard cached clients after runtime credentials change."""
+    get_llm.cache_clear()
+    get_chat_llm.cache_clear()
+    get_vision_llm.cache_clear()
+
+
 def invoke_vision_image_summary(
     image_bytes: bytes,
     prompt: str,
