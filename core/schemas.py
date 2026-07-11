@@ -1,6 +1,6 @@
 """Pydantic output models for all four agents."""
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -150,3 +150,66 @@ class SummaryOutput(BaseModel):
         default_factory=list,
         description="Most important evidence carried into the final note",
     )
+
+
+class ComparisonPaper(BaseModel):
+    """One saved paper participating in a comparison workspace."""
+
+    history_id: str
+    label: str = Field(description="Stable paper label such as P1")
+    title: str
+    filename: str
+
+
+class ComparisonCell(BaseModel):
+    """One paper's answer for a shared comparison dimension."""
+
+    paper_label: str = Field(description="Paper label such as P1")
+    summary: str = Field(description="Concise paper-specific finding for this dimension")
+    evidence_ids: List[str] = Field(
+        default_factory=list,
+        description="Prefixed evidence IDs such as P1:E003 or P2:T001",
+    )
+
+
+class ComparisonDimension(BaseModel):
+    """A shared axis used to compare all selected papers."""
+
+    key: str = Field(description="Stable snake_case dimension key")
+    title: str = Field(description="Short Simplified Chinese dimension title")
+    category: Literal["overview", "method", "experiment", "critique"]
+    description: str = Field(description="What is being compared and why it matters")
+    cells: List[ComparisonCell] = Field(default_factory=list)
+    synthesis: str = Field(description="Cross-paper conclusion for this dimension")
+    comparability: Literal["direct", "conditional", "not_comparable"]
+    warning: Optional[str] = Field(
+        default=None,
+        description="Why the values are only conditionally comparable or not comparable",
+    )
+
+
+class ComparisonOutput(BaseModel):
+    """Evidence-grounded structured comparison across saved papers."""
+
+    title: str
+    focus: str
+    executive_summary: str
+    papers: List[ComparisonPaper] = Field(default_factory=list)
+    common_ground: List[str] = Field(default_factory=list)
+    key_differences: List[str] = Field(default_factory=list)
+    dimensions: List[ComparisonDimension] = Field(default_factory=list)
+    research_gaps: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ComparisonAssessment(BaseModel):
+    """Deterministic coverage indicators for a comparison result."""
+
+    score: int = Field(ge=0, le=100)
+    label: str
+    evidence_coverage: int = Field(ge=0, le=100)
+    paper_coverage: int = Field(ge=0, le=100)
+    referenced_claims: int = Field(ge=0)
+    total_claims: int = Field(ge=0)
+    warnings: List[str] = Field(default_factory=list)

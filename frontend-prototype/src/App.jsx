@@ -32,6 +32,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import avatarUrl from "./assets/avatar.png";
+import { ComparisonWorkspace, comparisonMarkdownFromData } from "./ComparisonWorkspace.jsx";
 
 const tabs = ["概览", "方法", "实验", "批判性评审", "最终笔记"];
 const emptyAgentStates = {
@@ -1034,6 +1035,9 @@ function PaperChatDrawer({
 }
 
 export function App() {
+  const [workspaceMode, setWorkspaceMode] = useState("reading");
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [comparisonData, setComparisonData] = useState(null);
   const [activeTab, setActiveTab] = useState("概览");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1065,10 +1069,26 @@ export function App() {
   const resultsPanelRef = useRef(null);
   const resultsScrollRef = useRef(null);
   const chatAbortRef = useRef(null);
+  const workspaceMenuRef = useRef(null);
 
   useEffect(() => {
     void loadPaperHistory();
     return () => chatAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    function closeWorkspaceMenu(event) {
+      if (!workspaceMenuRef.current?.contains(event.target)) setWorkspaceMenuOpen(false);
+    }
+    function closeWorkspaceMenuWithKeyboard(event) {
+      if (event.key === "Escape") setWorkspaceMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeWorkspaceMenu);
+    document.addEventListener("keydown", closeWorkspaceMenuWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", closeWorkspaceMenu);
+      document.removeEventListener("keydown", closeWorkspaceMenuWithKeyboard);
+    };
   }, []);
 
   const displayedData = analysisData || sampleAnalysis;
@@ -1079,6 +1099,9 @@ export function App() {
       displayedData.critic_output &&
       displayedData.summary_output,
   );
+  const hasExportData = workspaceMode === "comparison"
+    ? Boolean(comparisonData?.comparison)
+    : hasFinalAnalysis;
   const sourceSections = displayedPaper.sections?.length
     ? displayedPaper.sections
     : selectedFile
@@ -1342,6 +1365,7 @@ export function App() {
       setChatStreaming(false);
       setHistoryOpen(false);
       setRecentOpen(true);
+      setWorkspaceMode("reading");
       showToast(`已打开 ${item.title}`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "无法打开历史论文。" );
@@ -1774,7 +1798,9 @@ export function App() {
   }
 
   function copyJson() {
-    const payload = JSON.stringify(displayedData, null, 2);
+    const exportData = workspaceMode === "comparison" ? comparisonData : displayedData;
+    if (!exportData) return;
+    const payload = JSON.stringify(exportData, null, 2);
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(payload).catch(() => {});
     }
@@ -1782,13 +1808,19 @@ export function App() {
   }
 
   function downloadNotes(format) {
+    const exportData = workspaceMode === "comparison" ? comparisonData : displayedData;
+    if (!exportData) return;
     const ext = format === "markdown" ? "md" : "json";
-    const text = format === "markdown" ? markdownFromAnalysis(displayedData) : JSON.stringify(displayedData, null, 2);
+    const text = format === "markdown"
+      ? workspaceMode === "comparison"
+        ? comparisonMarkdownFromData(exportData)
+        : markdownFromAnalysis(displayedData)
+      : JSON.stringify(exportData, null, 2);
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `paper-reader-notes.${ext}`;
+    link.download = `${workspaceMode === "comparison" ? "paper-comparison" : "paper-reader-notes"}.${ext}`;
     link.click();
     URL.revokeObjectURL(url);
     showToast(format === "markdown" ? "Markdown exported" : "Notes downloaded");
@@ -1803,9 +1835,49 @@ export function App() {
           <span className="brand-mark"><IconBook2 size={18} stroke={1.8} /></span>
           <span>Paper Reader</span>
         </div>
-        <button className="workspace-switch" type="button">
-          Reading Workspace <IconChevronDown size={16} stroke={1.8} />
-        </button>
+        <div className={`workspace-menu ${workspaceMenuOpen ? "open" : ""}`} ref={workspaceMenuRef}>
+          <button
+            className="workspace-switch"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={workspaceMenuOpen}
+            onClick={() => setWorkspaceMenuOpen((value) => !value)}
+          >
+            {workspaceMode === "comparison" ? "Comparison Workspace" : "Reading Workspace"}
+            <IconChevronDown size={16} stroke={1.8} />
+          </button>
+          <div className="workspace-dropdown glass" role="menu">
+            <button
+              className={workspaceMode === "reading" ? "active" : ""}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setWorkspaceMode("reading");
+                setWorkspaceMenuOpen(false);
+                setHistoryOpen(false);
+              }}
+            >
+              <IconBook2 size={17} />
+              <span><strong>单篇论文研读</strong><small>Reading Workspace</small></span>
+              {workspaceMode === "reading" && <IconCheck size={16} />}
+            </button>
+            <button
+              className={workspaceMode === "comparison" ? "active" : ""}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setWorkspaceMode("comparison");
+                setWorkspaceMenuOpen(false);
+                setHistoryOpen(false);
+                if (!historyItems.length) void loadPaperHistory();
+              }}
+            >
+              <IconShare3 size={17} />
+              <span><strong>多论文对比</strong><small>Comparison Workspace</small></span>
+              {workspaceMode === "comparison" && <IconCheck size={16} />}
+            </button>
+          </div>
+        </div>
         <nav className="top-actions">
           <button
             type="button"
@@ -1827,14 +1899,14 @@ export function App() {
               <IconChevronDown size={14} stroke={1.8} />
             </button>
             <div className="export-dropdown glass" role="menu">
-              <button type="button" role="menuitem" onClick={copyJson}>
+              <button type="button" role="menuitem" onClick={copyJson} disabled={!hasExportData}>
                 <IconCopy size={17} /> 复制 JSON
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => downloadNotes("markdown")}
-                disabled={!hasFinalAnalysis}
+                disabled={!hasExportData}
               >
                 <IconMarkdown size={17} /> 导出 Markdown
               </button>
@@ -1842,7 +1914,7 @@ export function App() {
                 type="button"
                 role="menuitem"
                 onClick={() => downloadNotes("json")}
-                disabled={!hasFinalAnalysis}
+                disabled={!hasExportData}
               >
                 <IconDownload size={17} /> 下载笔记
               </button>
@@ -1853,6 +1925,19 @@ export function App() {
         </nav>
       </header>
 
+      {workspaceMode === "comparison" ? (
+        <ComparisonWorkspace
+          historyItems={historyItems}
+          historyLoading={historyLoading}
+          historyError={historyError}
+          showToast={showToast}
+          onResultChange={setComparisonData}
+          onAddPaper={() => {
+            setWorkspaceMode("reading");
+            window.setTimeout(() => fileInputRef.current?.click(), 80);
+          }}
+        />
+      ) : (
       <main className="workspace">
         <aside className="paper-panel glass">
           <label
@@ -2078,6 +2163,7 @@ export function App() {
           )}
         </section>
       </main>
+      )}
 
       {historyOpen && (
         <div className="history-popover glass">

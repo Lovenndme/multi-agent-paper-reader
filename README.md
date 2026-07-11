@@ -16,6 +16,7 @@ The repository includes a full-stack web app:
 - Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
 - Follow-up API: `POST /api/chat/stream` combines recent turns, a compact long-term memory index, query-relevant topic memories, recalled older messages, and full-text paper evidence
 - Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper
+- Comparison API: `POST /api/comparisons/stream` compares 2-4 saved papers with prefixed evidence, while `/api/comparisons/*` persists comparison workspaces and cross-paper conversations
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
 - Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded GLM batch before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
@@ -83,6 +84,12 @@ The live stream emits these event types:
 
 `agent_token` is the raw model generation stream. The frontend shows it as a live preview, then renders the parsed Pydantic output once the JSON object is complete.
 
+## Multi-Paper Comparison
+
+Use the `Reading Workspace` menu to switch to `Comparison Workspace`, then select two to four previously analyzed papers. ComparisonAgent reuses each paper's structured Method, Experiment, Critic, and Summary outputs, but verifies paper-specific claims against balanced slices of the saved original evidence. Evidence IDs are namespaced as `P1:E003`, `P2:T001`, or `P3:F002`, so overlapping IDs from different PDFs cannot be confused.
+
+The result includes a horizontally scrollable comparison matrix, direct/conditional/not-comparable labels, dataset and metric mismatch warnings, clickable evidence previews, research gaps, conditional recommendations, and deterministic evidence-coverage indicators. Completed comparisons, selected paper relationships, and cross-paper conversations are stored in the same SQLite database and survive browser refreshes or backend restarts. Cross-paper chat retrieves a balanced evidence set from every selected paper instead of sending all PDFs to the model at once.
+
 ## Explainable Assessment
 
 Every completed API response includes an `assessment` object with two separate results:
@@ -104,7 +111,7 @@ Questions that explicitly ask for recent work, related papers, or comparisons wi
 
 ## Paper History
 
-Every completed upload is saved locally in `.paper-reader/` by default. The SQLite database contains paper metadata, structured Agent outputs, assessment results, complete evidence snippets, chat conversations, immutable original messages, memory indexes, and topic memories; the original PDF is retained in `.paper-reader/papers/`. Uploading the same PDF again updates its existing history record instead of creating a duplicate. `Recent Papers` and the header History menu read this database, so a saved analysis and all of its conversations can be reopened after a browser refresh or backend restart without uploading the PDF again. Reopening a Live result recreates its grounded evidence session from the saved evidence.
+Every completed upload is saved locally in `.paper-reader/` by default. The SQLite database contains paper metadata, structured Agent outputs, assessment results, complete evidence snippets, single-paper and comparison workspaces, chat conversations, immutable original messages, memory indexes, and topic memories; the original PDF is retained in `.paper-reader/papers/`. Uploading the same PDF again updates its existing history record instead of creating a duplicate. `Recent Papers` and the header History menu read this database, so a saved analysis and all of its conversations can be reopened after a browser refresh or backend restart without uploading the PDF again. Reopening a Live result recreates its grounded evidence session from the saved evidence.
 
 Set `PAPER_READER_DATA_DIR` to move all history storage, or set `PAPER_HISTORY_DB` to choose a specific SQLite path. Deleting an item from the History menu removes both its database record and retained PDF.
 

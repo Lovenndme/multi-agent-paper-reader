@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from agents.critic_agent import run_critic_agent, stream_critic_agent
+from agents.comparison_agent import stream_comparison_agent
 from agents.experiment_agent import run_experiment_agent, stream_experiment_agent
 from agents.method_agent import run_method_agent, stream_method_agent
 from agents.summary_agent import run_summary_agent, stream_summary_agent
@@ -40,6 +41,36 @@ from core.chat_memory import (
     load_conversation,
     rename_conversation,
     schedule_memory_refresh,
+)
+from core.comparison import (
+    ComparisonCreateRequest,
+    build_comparison_assessment,
+    build_comparison_evidence_catalog,
+    demo_comparison_output,
+    load_comparison_sources,
+    sanitize_comparison_output,
+)
+from core.comparison_chat import (
+    ComparisonChatRequest,
+    build_comparison_chat_prompt,
+    demo_comparison_chat_reply,
+    stream_comparison_chat_reply,
+)
+from core.comparison_history import (
+    ComparisonConversationCreateRequest,
+    ComparisonConversationUpdateRequest,
+    add_comparison_message,
+    comparison_exists,
+    create_comparison_conversation,
+    delete_comparison,
+    delete_comparison_conversation,
+    get_comparison_conversation_summary,
+    list_comparison_conversations,
+    list_comparisons,
+    load_comparison,
+    load_comparison_conversation,
+    rename_comparison_conversation,
+    save_comparison,
 )
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.history import (
@@ -686,6 +717,134 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
         )
 
 
+def _stream_comparison_response(
+    request: ComparisonCreateRequest,
+    *,
+    demo: bool,
+) -> Iterable[str]:
+    """Emit an evidence-grounded comparison and persist the completed workspace."""
+    try:
+        sources = load_comparison_sources(request.history_ids)
+        yield _stream_event(
+            "comparison_started",
+            focus=request.focus,
+            paper_count=len(sources),
+            message="正在读取历史论文与完整证据",
+        )
+        for source in sources:
+            yield _stream_event(
+                "paper_loaded",
+                label=source.label,
+                history_id=source.history_id,
+                title=source.title,
+                evidence_count=len(source.snippets),
+                message=f"{source.label} 已载入",
+            )
+
+        if demo:
+            output = demo_comparison_output(sources, request)
+            serialized = output.model_dump_json()
+            for index in range(0, len(serialized), 100):
+                yield _stream_event("comparison_token", text=serialized[index : index + 100])
+                time.sleep(0.01)
+        else:
+            event_queue: Queue[str] = Queue()
+
+            def on_token(token: str) -> None:
+                event_queue.put(_stream_event("comparison_token", text=token))
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(stream_comparison_agent, sources, request, on_token)
+                while not future.done():
+                    for event in _drain_agent_tokens(event_queue):
+                        yield event
+                    time.sleep(0.05)
+                for event in _drain_agent_tokens(event_queue):
+                    yield event
+                output = future.result()
+
+        sanitized = sanitize_comparison_output(output, sources, request)
+        assessment = build_comparison_assessment(sanitized)
+        result = {
+            "mode": "demo" if demo else "live",
+            "comparison": sanitized.model_dump(),
+            "assessment": assessment.model_dump(),
+            "evidence_catalog": build_comparison_evidence_catalog(sanitized, sources),
+        }
+        comparison_id = save_comparison(
+            result=result,
+            sources=sources,
+            request=request,
+        )
+        yield _stream_event(
+            "complete",
+            comparison_id=comparison_id,
+            **result,
+        )
+    except Exception as exc:  # noqa: BLE001 - stream actionable comparison errors
+        yield _stream_event("error", message=f"多论文对比失败：{exc}")
+
+
+def _stream_comparison_chat_response(
+    request: ComparisonChatRequest,
+    *,
+    demo: bool,
+) -> Iterable[str]:
+    """Stream and persist one cross-paper follow-up answer."""
+    conversation_id = request.conversation_id
+    try:
+        if conversation_id:
+            conversation = get_comparison_conversation_summary(conversation_id)
+            if conversation["comparison_id"] != request.comparison_id:
+                raise ValueError("Conversation does not belong to the current comparison.")
+        else:
+            conversation = create_comparison_conversation(request.comparison_id)
+            conversation_id = conversation["id"]
+        effective_request = request.model_copy(update={"conversation_id": conversation_id})
+        prompt = None if demo else build_comparison_chat_prompt(effective_request)
+        user_message = add_comparison_message(
+            conversation_id,
+            role="user",
+            content=request.question,
+            quote=request.selected_text,
+        )
+        answer_chunks: list[str] = []
+        if demo:
+            reply = demo_comparison_chat_reply(effective_request)
+            for index in range(0, len(reply), 28):
+                token = reply[index : index + 28]
+                answer_chunks.append(token)
+                yield _stream_event("token", text=token)
+                time.sleep(0.015)
+        else:
+            for token in stream_comparison_chat_reply(
+                effective_request,
+                messages=prompt.messages if prompt else None,
+            ):
+                answer_chunks.append(token)
+                yield _stream_event("token", text=token)
+        assistant_message = add_comparison_message(
+            conversation_id,
+            role="assistant",
+            content="".join(answer_chunks),
+        )
+        yield _stream_event(
+            "complete",
+            model=os.environ.get("MODEL_NAME", "glm-5.2"),
+            conversation_id=conversation_id,
+            conversation=get_comparison_conversation_summary(conversation_id),
+            user_message=user_message,
+            assistant_message=assistant_message,
+            prompt_stats=prompt.stats.__dict__ if prompt else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - stream actionable comparison chat errors
+        yield _stream_event(
+            "error",
+            message=f"跨论文追问失败：{exc}",
+            conversation_id=conversation_id,
+        )
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """Report whether the backend and live LLM configuration are available."""
@@ -697,6 +856,117 @@ def health() -> dict[str, Any]:
         "vision_configured": is_vision_configured(),
         "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
     }
+
+
+@app.get("/api/comparisons")
+def comparison_history(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """List persisted multi-paper comparison workspaces."""
+    return {"items": list_comparisons(limit=limit)}
+
+
+@app.post("/api/comparisons/stream")
+def compare_saved_papers(
+    request: ComparisonCreateRequest,
+    demo: bool = Query(default=False, description="Return deterministic comparison output."),
+) -> StreamingResponse:
+    """Compare two to four saved papers and stream the structured result."""
+    if not demo and not is_llm_configured():
+        raise HTTPException(status_code=503, detail="GLM_API_KEY is not set.")
+    return StreamingResponse(
+        _stream_comparison_response(request, demo=demo),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/comparisons/chat/stream")
+def chat_with_comparison(
+    request: ComparisonChatRequest,
+    demo: bool = Query(default=False, description="Return a deterministic comparison reply."),
+) -> StreamingResponse:
+    """Continue a persisted, evidence-grounded cross-paper conversation."""
+    if not demo and not is_llm_configured():
+        raise HTTPException(status_code=503, detail="GLM_API_KEY is not set.")
+    if not comparison_exists(request.comparison_id):
+        raise HTTPException(status_code=404, detail="Comparison workspace was not found.")
+    return StreamingResponse(
+        _stream_comparison_chat_response(request, demo=demo),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/comparisons/chat/conversations/{conversation_id}")
+def comparison_conversation_detail(conversation_id: str) -> dict[str, Any]:
+    try:
+        return load_comparison_conversation(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+
+@app.patch("/api/comparisons/chat/conversations/{conversation_id}")
+def update_comparison_conversation(
+    conversation_id: str,
+    request: ComparisonConversationUpdateRequest,
+) -> dict[str, Any]:
+    try:
+        return {"conversation": rename_comparison_conversation(conversation_id, request.title)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/comparisons/chat/conversations/{conversation_id}")
+def remove_comparison_conversation(conversation_id: str) -> dict[str, bool]:
+    if not delete_comparison_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation was not found.")
+    return {"ok": True}
+
+
+@app.get("/api/comparisons/{comparison_id}/conversations")
+def comparison_conversations(comparison_id: str) -> dict[str, Any]:
+    if not comparison_exists(comparison_id):
+        raise HTTPException(status_code=404, detail="Comparison workspace was not found.")
+    return {"items": list_comparison_conversations(comparison_id)}
+
+
+@app.post("/api/comparisons/{comparison_id}/conversations")
+def create_comparison_chat_conversation(
+    comparison_id: str,
+    request: ComparisonConversationCreateRequest,
+) -> dict[str, Any]:
+    try:
+        return {
+            "conversation": create_comparison_conversation(
+                comparison_id,
+                title=request.title,
+            )
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+
+@app.get("/api/comparisons/{comparison_id}")
+def comparison_detail(comparison_id: str) -> dict[str, Any]:
+    stored = load_comparison(comparison_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Comparison workspace was not found.")
+    return {
+        "comparison_id": comparison_id,
+        **stored["result"],
+        "workspace": stored["workspace"],
+        "papers": stored["papers"],
+    }
+
+
+@app.delete("/api/comparisons/{comparison_id}")
+def remove_comparison(comparison_id: str) -> dict[str, bool]:
+    if not delete_comparison(comparison_id):
+        raise HTTPException(status_code=404, detail="Comparison workspace was not found.")
+    return {"ok": True}
 
 
 @app.get("/api/history")

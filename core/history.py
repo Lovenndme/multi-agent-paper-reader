@@ -157,6 +157,21 @@ def delete_paper_history(history_id: str) -> bool:
         ).fetchone()
         if row is None:
             return False
+        comparison_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'comparison_papers'"
+        ).fetchone()
+        if comparison_table is not None:
+            connection.execute(
+                """
+                DELETE FROM comparison_workspaces
+                WHERE id IN (
+                    SELECT comparison_id
+                    FROM comparison_papers
+                    WHERE paper_history_id = ?
+                )
+                """,
+                (history_id,),
+            )
         connection.execute("DELETE FROM paper_history WHERE id = ?", (history_id,))
         pdf_path = Path(str(row["pdf_path"]))
     try:
