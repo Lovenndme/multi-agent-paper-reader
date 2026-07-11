@@ -4,6 +4,8 @@
 
 Multi-Agent Paper Reader 是一个基于证据的学术论文研读助手。用户上传 PDF 后，系统会解析论文结构，根据正文、提取的表格以及视觉模型生成的图像摘要建立可追溯证据索引，再由多个专职 Agent 分别完成方法分析、实验分析和批判性评审，最后生成结构清晰的论文研读笔记。
 
+![Paper Reader 论文研读工作台](./docs/assets/paper-reader-workspace.png)
+
 ## Web 应用
 
 本仓库包含一个完整的全栈 Web 应用：

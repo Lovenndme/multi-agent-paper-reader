@@ -4,6 +4,8 @@
 
 Multi-Agent Paper Reader is an evidence-grounded research paper reading assistant. Upload a PDF, parse its sections, build a traceable evidence index from text, extracted tables, and vision-model figure summaries, run specialist agents for method analysis, experiment analysis, and critique, then synthesize a polished structured reading note.
 
+![Paper Reader workspace](./docs/assets/paper-reader-workspace.png)
+
 ## Web App
 
 The repository includes a full-stack web app:
