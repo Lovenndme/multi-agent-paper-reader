@@ -21,6 +21,7 @@ import {
   IconLoader2,
   IconMarkdown,
   IconMessageCircle,
+  IconPencil,
   IconPlus,
   IconQuote,
   IconSearch,
@@ -824,9 +825,13 @@ function PaperChatDrawer({
   onConversationChange,
   onNewConversation,
   onDeleteConversation,
+  onRenameConversation,
 }) {
   const textareaRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
 
   useEffect(() => {
     textareaRef.current?.focus();
@@ -836,10 +841,33 @@ function PaperChatDrawer({
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages, isStreaming]);
 
+  useEffect(() => {
+    setIsRenaming(false);
+    setRenameValue(activeConversation?.title || "");
+  }, [activeConversationId, activeConversation?.title]);
+
   function handleKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       if (input.trim() && !isStreaming) onSend();
+    }
+  }
+
+  async function submitRename() {
+    const title = renameValue.trim();
+    if (!activeConversationId || !title) return;
+    const saved = await onRenameConversation(title);
+    if (saved !== false) setIsRenaming(false);
+  }
+
+  function handleRenameKeyDown(event) {
+    if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      void submitRename();
+    }
+    if (event.key === "Escape") {
+      setRenameValue(activeConversation?.title || "");
+      setIsRenaming(false);
     }
   }
 
@@ -867,28 +895,78 @@ function PaperChatDrawer({
       </header>
 
       <div className="chat-session-bar">
-        <select
-          aria-label="选择论文追问会话"
-          value={activeConversationId || ""}
-          onChange={(event) => onConversationChange(event.target.value)}
-          disabled={isStreaming || isConversationLoading}
-        >
-          <option value="">新对话</option>
-          {conversations.map((conversation) => (
-            <option value={conversation.id} key={conversation.id}>
-              {conversation.title}（{conversation.message_count}）
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          title="新建对话"
-          aria-label="新建对话"
-          onClick={onNewConversation}
-          disabled={isStreaming || isConversationLoading}
-        >
-          <IconPlus size={17} stroke={2} />
-        </button>
+        {isRenaming ? (
+          <>
+            <input
+              type="text"
+              aria-label="修改会话名称"
+              value={renameValue}
+              maxLength={80}
+              autoFocus
+              onChange={(event) => setRenameValue(event.target.value)}
+              onKeyDown={handleRenameKeyDown}
+              disabled={isConversationLoading}
+            />
+            <button
+              type="button"
+              title="保存名称"
+              aria-label="保存会话名称"
+              onClick={() => void submitRename()}
+              disabled={!renameValue.trim() || isConversationLoading}
+            >
+              <IconCheck size={17} stroke={2} />
+            </button>
+            <button
+              type="button"
+              title="取消编辑"
+              aria-label="取消修改会话名称"
+              onClick={() => {
+                setRenameValue(activeConversation?.title || "");
+                setIsRenaming(false);
+              }}
+              disabled={isConversationLoading}
+            >
+              <IconX size={17} stroke={2} />
+            </button>
+          </>
+        ) : (
+          <>
+            <select
+              aria-label="选择论文追问会话"
+              value={activeConversationId || ""}
+              onChange={(event) => onConversationChange(event.target.value)}
+              disabled={isStreaming || isConversationLoading}
+            >
+              <option value="">新对话</option>
+              {conversations.map((conversation) => (
+                <option value={conversation.id} key={conversation.id}>
+                  {conversation.title}（{conversation.message_count}）
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              title="修改当前会话名称"
+              aria-label="修改当前会话名称"
+              onClick={() => {
+                setRenameValue(activeConversation?.title || "");
+                setIsRenaming(true);
+              }}
+              disabled={!activeConversationId || isStreaming || isConversationLoading}
+            >
+              <IconPencil size={16} stroke={1.9} />
+            </button>
+            <button
+              type="button"
+              title="新建对话"
+              aria-label="新建对话"
+              onClick={onNewConversation}
+              disabled={isStreaming || isConversationLoading}
+            >
+              <IconPlus size={17} stroke={2} />
+            </button>
+          </>
+        )}
       </div>
 
       <div className="chat-messages">
@@ -1175,6 +1253,35 @@ export function App() {
       await loadChatConversation(conversationId);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "无法恢复这段对话。" );
+    }
+  }
+
+  async function renameActiveChatConversation(title) {
+    if (!activeConversationId || chatStreaming || chatConversationLoading) return false;
+    setChatConversationLoading(true);
+    try {
+      const response = await fetch(`/api/chat/conversations/${encodeURIComponent(activeConversationId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Conversation rename failed（HTTP ${response.status}）`);
+      }
+      const payload = await response.json();
+      if (payload.conversation) {
+        setChatConversations((previous) => previous.map((conversation) => (
+          conversation.id === payload.conversation.id ? payload.conversation : conversation
+        )));
+      }
+      showToast("会话名称已更新");
+      return true;
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法修改会话名称。" );
+      return false;
+    } finally {
+      setChatConversationLoading(false);
     }
   }
 
@@ -1966,6 +2073,7 @@ export function App() {
               onConversationChange={selectChatConversation}
               onNewConversation={startNewChatConversation}
               onDeleteConversation={deleteActiveChatConversation}
+              onRenameConversation={renameActiveChatConversation}
             />
           )}
         </section>

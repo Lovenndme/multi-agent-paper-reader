@@ -15,6 +15,7 @@ from core.chat_memory import (
     get_prompt_memory,
     list_conversations,
     load_conversation,
+    rename_conversation,
     refresh_conversation_memory,
 )
 from core.evidence import EvidenceSnippet
@@ -73,6 +74,10 @@ class TestChatMemory(unittest.TestCase):
         self.assertEqual(restored["messages"][0]["quote"], "方法片段")
         self.assertEqual({item["id"] for item in conversations}, {first["id"], second["id"]})
         self.assertEqual(restored["conversation"]["message_count"], 2)
+
+        renamed = rename_conversation(first["id"], "Transformer 方法细节")
+        self.assertEqual(renamed["title"], "Transformer 方法细节")
+        self.assertEqual(load_conversation(first["id"])["conversation"]["title"], "Transformer 方法细节")
 
     def test_recent_context_and_query_recall_use_full_history(self):
         conversation = create_conversation(self.history_id)

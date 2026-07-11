@@ -1216,14 +1216,15 @@ button {
 
 .chat-session-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) 34px 34px;
   gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid rgba(84, 111, 137, 0.13);
   background: rgba(255, 255, 255, 0.2);
 }
 
-.chat-session-bar select {
+.chat-session-bar select,
+.chat-session-bar input {
   width: 100%;
   min-width: 0;
   height: 34px;
@@ -1238,7 +1239,13 @@ button {
   cursor: pointer;
 }
 
-.chat-session-bar select:focus-visible {
+.chat-session-bar input {
+  padding-right: 10px;
+  cursor: text;
+}
+
+.chat-session-bar select:focus-visible,
+.chat-session-bar input:focus-visible {
   border-color: rgba(22, 119, 238, 0.55);
   box-shadow: 0 0 0 2px rgba(22, 119, 238, 0.12);
 }
@@ -1260,7 +1267,8 @@ button {
 }
 
 .chat-session-bar button:disabled,
-.chat-session-bar select:disabled {
+.chat-session-bar select:disabled,
+.chat-session-bar input:disabled {
   cursor: default;
   opacity: 0.5;
 }
