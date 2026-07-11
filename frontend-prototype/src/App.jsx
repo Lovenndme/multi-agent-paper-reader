@@ -24,7 +24,6 @@ import {
   IconQuote,
   IconSearch,
   IconSend,
-  IconSettings,
   IconShare3,
   IconSparkles,
   IconTrash,
@@ -916,7 +915,6 @@ function PaperChatDrawer({
 export function App() {
   const [activeTab, setActiveTab] = useState("概览");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chaptersOpen, setChaptersOpen] = useState(true);
   const [recentOpen, setRecentOpen] = useState(false);
@@ -929,7 +927,6 @@ export function App() {
   const [agentStates, setAgentStates] = useState(emptyAgentStates);
   const [agentStreams, setAgentStreams] = useState(emptyAgentStreams);
   const [streamMessage, setStreamMessage] = useState("已准备好开始分析");
-  const [demoMode, setDemoMode] = useState(false);
   const [selectionAction, setSelectionAction] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatQuote, setChatQuote] = useState("");
@@ -1221,7 +1218,7 @@ export function App() {
     chatAbortRef.current = controller;
 
     try {
-      const useDemoChat = demoMode || displayedData.mode !== "live";
+      const useDemoChat = displayedData.mode !== "live";
       const response = await fetch(`/api/chat/stream?demo=${useDemoChat ? "true" : "false"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1421,13 +1418,13 @@ export function App() {
     setChatQuote("");
     setChatInput("");
     setChatMessages([]);
-    showToast(demoMode ? "Demo analysis started" : "Live analysis started");
+    showToast("Live analysis started");
 
     const form = new FormData();
     form.append("file", selectedFile);
 
     try {
-      const response = await fetch(`/api/analyze/stream?demo=${demoMode ? "true" : "false"}`, {
+      const response = await fetch("/api/analyze/stream", {
         method: "POST",
         body: form,
       });
@@ -1479,7 +1476,7 @@ export function App() {
       if (!completed) {
         throw new Error("流式分析在生成最终结果前意外结束。" );
       }
-      showToast(demoMode ? "Demo stream complete" : "Live analysis complete");
+      showToast("Live analysis complete");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Analysis failed.";
       setAnalysisError(message);
@@ -1524,9 +1521,6 @@ export function App() {
           Reading Workspace <IconChevronDown size={16} stroke={1.8} />
         </button>
         <nav className="top-actions">
-          <button type="button" onClick={() => setSettingsOpen(true)}>
-            <IconSettings size={18} stroke={1.8} /> Model Settings
-          </button>
           <button
             type="button"
             onClick={() => {
@@ -1826,48 +1820,6 @@ export function App() {
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {settingsOpen && (
-        <div className="modal-backdrop" onMouseDown={() => setSettingsOpen(false)}>
-          <section className="settings-modal glass" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="popover-heading">
-              <strong>Model Settings</strong>
-              <button type="button" onClick={() => setSettingsOpen(false)}><IconX size={18} /></button>
-            </div>
-            <label>
-              <span>Model Provider</span>
-              <select defaultValue="glm">
-                <option value="glm">Zhipu GLM</option>
-                <option value="openai">OpenAI compatible</option>
-                <option value="qwen">Qwen DashScope</option>
-                <option value="local">Local endpoint</option>
-              </select>
-            </label>
-            <label>
-              <span>Model Name</span>
-              <input defaultValue="glm-5.2" />
-            </label>
-            <label>
-              <span>Temperature</span>
-              <input type="range" min="0" max="1" step="0.1" defaultValue="0.4" />
-            </label>
-            <label>
-              <span>Output Format</span>
-              <select defaultValue="json">
-                <option value="json">Structured JSON</option>
-                <option value="markdown">Markdown notes</option>
-              </select>
-            </label>
-            <label className="toggle-row">
-              <input type="checkbox" checked={demoMode} onChange={(event) => setDemoMode(event.target.checked)} />
-              <span>Demo mode: verify upload/parser without LLM API calls</span>
-            </label>
-            <AppButton className="save-settings" onClick={() => { setSettingsOpen(false); showToast("Settings saved"); }}>
-              Save Settings
-            </AppButton>
-          </section>
         </div>
       )}
 

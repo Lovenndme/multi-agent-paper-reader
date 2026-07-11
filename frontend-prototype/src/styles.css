@@ -1953,69 +1953,6 @@ button {
   cursor: pointer;
 }
 
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  display: grid;
-  place-items: center;
-  background: rgba(214, 229, 242, 0.26);
-  backdrop-filter: blur(8px);
-}
-
-.settings-modal {
-  width: min(420px, calc(100vw - 34px));
-  border-radius: 24px;
-  padding: 20px;
-}
-
-.settings-modal label {
-  display: grid;
-  gap: 8px;
-  margin-top: 14px;
-  color: rgba(28, 51, 72, 0.78);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.settings-modal input,
-.settings-modal select {
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid rgba(91, 126, 158, 0.2);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.58);
-  color: #12263c;
-  padding: 0 12px;
-  outline: none;
-}
-
-.settings-modal .toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid rgba(91, 126, 158, 0.14);
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.38);
-  color: #25425e;
-  font-size: 12px;
-  font-weight: 560;
-}
-
-.settings-modal .toggle-row input {
-  width: 16px;
-  min-height: 16px;
-  padding: 0;
-}
-
-.save-settings {
-  width: 100%;
-  margin-top: 20px;
-  background: #147dff;
-  color: white;
-}
-
 .toast {
   position: fixed;
   right: 34px;
