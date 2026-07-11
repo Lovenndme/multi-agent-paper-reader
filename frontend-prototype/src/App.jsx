@@ -1103,7 +1103,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.0"}</strong>
+                <strong>{status.version || "V1.1"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
