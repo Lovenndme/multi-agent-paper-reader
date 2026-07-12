@@ -22,7 +22,7 @@ class TestApplicationSettings(unittest.TestCase):
             payload = application_settings_payload()
 
         self.assertTrue(payload["api_key_configured"])
-        self.assertEqual(payload["version"], "V1.1.2")
+        self.assertEqual(payload["version"], "V1.2.0")
         self.assertNotIn("secret-test-value", repr(payload))
 
     def test_request_representation_masks_api_key(self):
@@ -55,7 +55,8 @@ class TestApplicationSettings(unittest.TestCase):
 
                 self.assertTrue(payload["api_key_configured"])
                 self.assertIn("GLM_API_KEY='test-key-that-is-long-enough'", env_path.read_text())
-                self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
                 reset_clients.assert_called_once_with()
         finally:
             if previous_key is None:

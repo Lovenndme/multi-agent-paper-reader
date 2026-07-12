@@ -21,8 +21,8 @@ from utils.llm import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ENV_PATH = PROJECT_ROOT / ".env"
-PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.1.2")
+ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", PROJECT_ROOT / ".env")).expanduser()
+PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.2.0")
 _SETTINGS_LOCK = threading.Lock()
 
 
