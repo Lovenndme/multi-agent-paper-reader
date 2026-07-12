@@ -22,11 +22,13 @@ class TestConversationTitles(unittest.TestCase):
     def test_model_title_is_cleaned_and_keeps_compact_summary(self):
         with (
             patch("core.conversation_titles.is_llm_configured", return_value=True),
+            patch("core.conversation_titles.get_chat_llm") as get_chat_llm,
             patch(
                 "core.conversation_titles.invoke_with_retry",
                 return_value=SimpleNamespace(content="会话标题：GRPO 奖励机制解析？"),
             ),
         ):
+            get_chat_llm.return_value.bind.return_value = object()
             title = generate_conversation_title("举例说明 GRPO 的奖励如何计算")
 
         self.assertEqual(title, "GRPO 奖励机制解析")

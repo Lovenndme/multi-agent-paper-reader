@@ -103,7 +103,8 @@ from utils.llm import is_llm_configured, is_vision_configured
 ROOT = Path(__file__).parent
 FRONTEND_DIST = ROOT / "frontend-prototype" / "dist"
 
-load_dotenv(ROOT / ".env", override=False)
+ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", ROOT / ".env")).expanduser()
+load_dotenv(ENV_PATH, override=False)
 
 app = FastAPI(
     title="Multi-Agent Paper Reader",

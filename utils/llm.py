@@ -16,7 +16,8 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-_env_path = Path(__file__).parent.parent / ".env"
+_default_env_path = Path(__file__).parent.parent / ".env"
+_env_path = Path(os.environ.get("PAPER_READER_ENV_PATH", _default_env_path)).expanduser()
 load_dotenv(dotenv_path=_env_path, override=False)
 
 # Temperature env var lets users override without code changes.
@@ -363,7 +364,13 @@ def _write_llm_diagnostic(
     output_text: str,
 ) -> None:
     try:
-        log_path = Path(__file__).parent.parent / "llm_diagnostics.log"
+        data_directory = os.environ.get("PAPER_READER_DATA_DIR")
+        log_path = (
+            Path(data_directory).expanduser() / "logs" / "llm_diagnostics.log"
+            if data_directory
+            else Path(__file__).parent.parent / "llm_diagnostics.log"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         excerpt = output_text[-1800:] if output_text else ""
         payload = {
             "time": datetime.now().isoformat(timespec="seconds"),
