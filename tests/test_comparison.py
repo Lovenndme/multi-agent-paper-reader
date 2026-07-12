@@ -148,6 +148,7 @@ class TestMultiPaperComparison(unittest.TestCase):
 
         self.assertIn("P1:E001", prompt_text)
         self.assertIn("P2:E001", prompt_text)
+        self.assertIn("不要把长公式或推导塞进表格", prompt_text)
         self.assertEqual([message["role"] for message in restored["messages"]], ["user", "assistant"])
         self.assertEqual(len(list_comparison_conversations(comparison_id)), 1)
         self.assertEqual(events[-1]["conversation"]["message_count"], 2)

@@ -6,6 +6,7 @@ import {
   IconCheck,
   IconChevronRight,
   IconFileTypePdf,
+  IconGripVertical,
   IconHistory,
   IconLoader2,
   IconMessageCircle,
@@ -18,6 +19,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
+import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
 const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
@@ -646,7 +648,7 @@ export function ComparisonWorkspace({
         </section>
       </aside>
 
-      <section className="comparison-result-panel glass" ref={resultPanelRef}>
+      <section className={`comparison-result-panel glass${chatOpen ? " chat-open" : ""}`} ref={resultPanelRef}>
         {!comparison && !isComparing && !error && (
           <div className="comparison-welcome">
             <span><IconArrowsLeftRight size={30} stroke={1.45} /></span>
@@ -901,6 +903,15 @@ function ComparisonChatDrawer({
   const textareaRef = useRef(null);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const {
+    width: drawerWidth,
+    minWidth: drawerMinWidth,
+    maxWidth: drawerMaxWidth,
+    isResizing,
+    drawerStyle,
+    startResize,
+    handleResizeKeyDown,
+  } = useResizableChatDrawer();
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const {
     containerRef: messagesContainerRef,
@@ -929,7 +940,26 @@ function ComparisonChatDrawer({
   }
 
   return (
-    <section className="paper-chat-drawer comparison-chat-drawer" aria-label="跨论文追问">
+    <section
+      className={`paper-chat-drawer comparison-chat-drawer${isResizing ? " resizing" : ""}`}
+      aria-label="跨论文追问"
+      style={drawerStyle}
+    >
+      <div
+        className="chat-resize-handle"
+        role="separator"
+        aria-label="调整跨论文追问宽度"
+        aria-orientation="vertical"
+        aria-valuemin={drawerMinWidth}
+        aria-valuemax={drawerMaxWidth}
+        aria-valuenow={Math.round(drawerWidth)}
+        tabIndex={0}
+        title="拖动调整追问宽度"
+        onPointerDown={startResize}
+        onKeyDown={handleResizeKeyDown}
+      >
+        <IconGripVertical size={16} stroke={1.8} />
+      </div>
       <header className="chat-header">
         <div>
           <span><IconMessageCircle size={16} /> 对比追问</span>

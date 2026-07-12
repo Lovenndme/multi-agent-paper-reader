@@ -19,6 +19,7 @@ import {
   IconFileAnalytics,
   IconFileDescription,
   IconFileTypePdf,
+  IconGripVertical,
   IconHistory,
   IconKey,
   IconListDetails,
@@ -41,6 +42,7 @@ import {
 import avatarUrl from "./assets/avatar.png";
 import { ComparisonWorkspace, comparisonMarkdownFromData } from "./ComparisonWorkspace.jsx";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
+import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
 const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
@@ -831,6 +833,15 @@ function PaperChatDrawer({
   const textareaRef = useRef(null);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const {
+    width: drawerWidth,
+    minWidth: drawerMinWidth,
+    maxWidth: drawerMaxWidth,
+    isResizing,
+    drawerStyle,
+    startResize,
+    handleResizeKeyDown,
+  } = useResizableChatDrawer();
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
   const {
     containerRef: messagesContainerRef,
@@ -874,7 +885,27 @@ function PaperChatDrawer({
   }
 
   return (
-    <section className="paper-chat-drawer" id="paper-chat-drawer" aria-label="论文追问">
+    <section
+      className={`paper-chat-drawer${isResizing ? " resizing" : ""}`}
+      id="paper-chat-drawer"
+      aria-label="论文追问"
+      style={drawerStyle}
+    >
+      <div
+        className="chat-resize-handle"
+        role="separator"
+        aria-label="调整论文追问宽度"
+        aria-orientation="vertical"
+        aria-valuemin={drawerMinWidth}
+        aria-valuemax={drawerMaxWidth}
+        aria-valuenow={Math.round(drawerWidth)}
+        tabIndex={0}
+        title="拖动调整论文追问宽度"
+        onPointerDown={startResize}
+        onKeyDown={handleResizeKeyDown}
+      >
+        <IconGripVertical size={16} stroke={1.8} />
+      </div>
       <header className="chat-header">
         <div>
           <span><IconMessageCircle size={16} stroke={1.8} /> 论文追问</span>
@@ -1065,7 +1096,7 @@ function SettingsDialog({
       }}
     >
       <section
-        className="settings-dialog glass"
+        className="settings-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-dialog-title"
@@ -1103,7 +1134,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.1"}</strong>
+                <strong>{status.version || "V1.1.1"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -2340,7 +2371,7 @@ export function App() {
           </AppButton>
         </section>
 
-        <section className="results-panel glass" ref={resultsPanelRef}>
+        <section className={`results-panel glass${chatOpen ? " chat-open" : ""}`} ref={resultsPanelRef}>
           <div className="tabs">
             {tabs.map((tab) => (
               <button

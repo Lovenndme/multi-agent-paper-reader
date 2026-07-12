@@ -35,9 +35,20 @@ export function normalizeMathDelimiters(markdown) {
     .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
     .map((part, index) => {
       if (index % 2 === 1) return part;
-      return part
+      const normalized = part
         .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$\n${formula.trim()}\n$$\n`)
-        .replace(/\\\(([^\n]*?)\\\)/g, (_, formula) => `$${formula.trim()}$`);
+        .replace(/\\\(([^\n]*?)\\\)/g, (_, formula) => `$${formula.trim()}$`)
+        .replace(/^\s*\$\$([^\n]+?)\$\$\s*$/gm, (_, formula) => `$$\n${formula.trim()}\n$$`);
+      return normalized
+        .split("\n")
+        .map((line) => {
+          const trimmed = line.trim();
+          if (/^\$(?!\$).+(?<!\$)\$$/.test(trimmed)) {
+            return `$$\n${trimmed.slice(1, -1).trim()}\n$$`;
+          }
+          return line;
+        })
+        .join("\n");
     })
     .join("");
 }

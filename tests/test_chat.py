@@ -50,6 +50,7 @@ class TestPaperChat(unittest.TestCase):
         self.assertIsInstance(messages[2], AIMessage)
         self.assertIn("RAG", messages[0].content)
         self.assertNotIn("must not enter prompt", messages[0].content)
+        self.assertIn("不要把长公式或推导塞进表格", messages[0].content)
         self.assertIn("<selected_excerpt>", messages[-1].content)
         self.assertIn("这个结论为什么成立", messages[-1].content)
 
