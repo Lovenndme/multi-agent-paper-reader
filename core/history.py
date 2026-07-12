@@ -7,6 +7,8 @@ import json
 import os
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,7 +51,7 @@ def save_paper_analysis(
         separators=(",", ":"),
     )
 
-    with _HISTORY_LOCK, _connect() as connection:
+    with _HISTORY_LOCK, history_database_connection() as connection:
         existing = connection.execute(
             "SELECT id, created_at, pdf_path FROM paper_history WHERE sha256 = ?",
             (digest,),
@@ -100,7 +102,7 @@ def save_paper_analysis(
 def list_paper_history(*, limit: int = 100) -> list[dict[str, Any]]:
     """Return recent saved analyses without their large result payloads."""
     bounded_limit = max(1, min(limit, 500))
-    with _connect() as connection:
+    with history_database_connection() as connection:
         rows = connection.execute(
             """
             SELECT id, title, filename, mode, pages, sections_count, size_bytes,
@@ -116,7 +118,7 @@ def list_paper_history(*, limit: int = 100) -> list[dict[str, Any]]:
 
 def load_paper_analysis(history_id: str) -> dict[str, Any] | None:
     """Load one saved result and its complete evidence snippets."""
-    with _connect() as connection:
+    with history_database_connection() as connection:
         row = connection.execute(
             "SELECT * FROM paper_history WHERE id = ?",
             (history_id,),
@@ -140,7 +142,7 @@ def load_paper_analysis(history_id: str) -> dict[str, Any] | None:
 
 def paper_history_exists(history_id: str) -> bool:
     """Check one saved analysis without decoding its large JSON payloads."""
-    with _connect() as connection:
+    with history_database_connection() as connection:
         row = connection.execute(
             "SELECT 1 FROM paper_history WHERE id = ?",
             (history_id,),
@@ -150,7 +152,7 @@ def paper_history_exists(history_id: str) -> bool:
 
 def delete_paper_history(history_id: str) -> bool:
     """Delete one saved analysis and its retained PDF."""
-    with _HISTORY_LOCK, _connect() as connection:
+    with _HISTORY_LOCK, history_database_connection() as connection:
         row = connection.execute(
             "SELECT pdf_path FROM paper_history WHERE id = ?",
             (history_id,),
@@ -212,9 +214,15 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
-def history_database_connection() -> sqlite3.Connection:
-    """Return the shared history database connection for related persistence modules."""
-    return _connect()
+@contextmanager
+def history_database_connection() -> Iterator[sqlite3.Connection]:
+    """Yield a transaction-scoped connection and always release its file handle."""
+    connection = _connect()
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def _database_path() -> Path:

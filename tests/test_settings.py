@@ -22,7 +22,7 @@ class TestApplicationSettings(unittest.TestCase):
             payload = application_settings_payload()
 
         self.assertTrue(payload["api_key_configured"])
-        self.assertEqual(payload["version"], "V1.1.1")
+        self.assertEqual(payload["version"], "V1.1.2")
         self.assertNotIn("secret-test-value", repr(payload))
 
     def test_request_representation_masks_api_key(self):

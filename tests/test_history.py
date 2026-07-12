@@ -2,6 +2,7 @@
 
 import os
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from core.chat import clear_analysis_sessions, get_analysis_session
 from core.evidence import EvidenceSnippet
 from core.history import (
     delete_paper_history,
+    history_database_connection,
     list_paper_history,
     load_paper_analysis,
     save_paper_analysis,
@@ -52,6 +54,21 @@ class TestPaperHistory(unittest.TestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["result"]["summary_output"]["one_sentence_summary"], "summary")
         self.assertEqual(loaded["snippets"][0].text, "complete source evidence")
+
+    def test_database_context_closes_connection_after_success(self):
+        with history_database_connection() as connection:
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
+    def test_database_context_closes_connection_after_error(self):
+        with self.assertRaisesRegex(RuntimeError, "forced failure"):
+            with history_database_connection() as connection:
+                raise RuntimeError("forced failure")
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_same_pdf_updates_one_stable_history_record(self):
         pdf_data = b"%PDF-1.7 duplicate"
