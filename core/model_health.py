@@ -17,6 +17,10 @@ from core.model_providers import PROVIDERS, provider_api_key, provider_base_url
 _CACHE_LOCK = threading.Lock()
 _CACHE_PAYLOAD: dict[str, Any] | None = None
 _CACHE_CREATED_AT = 0.0
+_VISION_PROBE_IMAGE_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAMAjAsK7+PTMRPLhGQd7QJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ES53Vg6wNShQF/fRSLfgAAAABJRU5ErkJggg=="
+)
 
 
 def invalidate_model_catalog_health_cache() -> None:
@@ -85,6 +89,9 @@ def _check_provider_catalog(provider_id: str) -> dict[str, Any]:
             "missing_text_models": [],
             "missing_vision_models": [],
             "vision_catalog_check": "not_run",
+            "vision_probe_status": "not_run",
+            "vision_probe_model": None,
+            "vision_http_status": None,
             "http_status": None,
         }
 
@@ -116,6 +123,9 @@ def _check_provider_catalog(provider_id: str) -> dict[str, Any]:
             "missing_text_models": [],
             "missing_vision_models": [],
             "vision_catalog_check": "not_run",
+            "vision_probe_status": "not_run",
+            "vision_probe_model": None,
+            "vision_http_status": None,
             "http_status": status_code if isinstance(status_code, int) else None,
         }
 
@@ -128,6 +138,9 @@ def _check_provider_catalog(provider_id: str) -> dict[str, Any]:
             "missing_text_models": [],
             "missing_vision_models": [],
             "vision_catalog_check": "not_run",
+            "vision_probe_status": "not_run",
+            "vision_probe_model": None,
+            "vision_http_status": None,
             "http_status": 200,
         }
 
@@ -150,25 +163,87 @@ def _check_provider_catalog(provider_id: str) -> dict[str, Any]:
         missing_vision = []
 
     drifted = bool(missing_text or missing_vision)
-    message = (
-        "模型目录与项目配置存在差异，请核对缺失模型。"
-        if drifted
-        else (
-            "文本目录已核对；厂商 /models 未列出视觉模型。"
-            if vision_check == "not_listed"
-            else "模型目录与项目配置一致。"
+    vision_model = spec.default_vision_model
+    if vision_model:
+        vision_probe_status, vision_http_status = _probe_vision_model(
+            api_key=api_key,
+            base_url=base_url,
+            model=vision_model,
+            timeout=timeout,
         )
-    )
+    else:
+        vision_probe_status, vision_http_status = "not_applicable", None
+
+    if vision_probe_status == "unavailable":
+        status = "unavailable"
+        message = f"视觉模型 {vision_model} 真实调用失败，当前不可用。"
+    elif drifted:
+        status = "drift"
+        message = (
+            f"模型目录与项目配置存在差异；视觉模型 {vision_model} 已通过真实调用，可用。"
+            if vision_model
+            else "模型目录与项目配置存在差异，请核对缺失模型。"
+        )
+    elif vision_probe_status == "available":
+        status = "ok"
+        message = f"文本目录正常；视觉模型 {vision_model} 已通过真实调用，可用。"
+    else:
+        status = "ok"
+        message = "文本目录正常；该厂商未配置视觉模型。"
+
     return {
         **common,
-        "status": "drift" if drifted else "ok",
+        "status": status,
         "message": message,
         "available_model_count": len(available),
         "missing_text_models": missing_text,
         "missing_vision_models": missing_vision,
         "vision_catalog_check": vision_check,
+        "vision_probe_status": vision_probe_status,
+        "vision_probe_model": vision_model,
+        "vision_http_status": vision_http_status,
         "http_status": 200,
     }
+
+
+def _probe_vision_model(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: float,
+) -> tuple[str, int | None]:
+    """Return whether a configured vision model accepts and understands an image."""
+    try:
+        response = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=0,
+        ).chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "这张纯色图片是什么颜色？只回答一种中文颜色。",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _VISION_PROBE_IMAGE_URL},
+                        },
+                    ],
+                }
+            ],
+        )
+        content = str(response.choices[0].message.content or "").strip().lower()
+    except Exception as exc:  # noqa: BLE001 - expose status only, never provider payloads
+        status_code = getattr(exc, "status_code", None)
+        return "unavailable", status_code if isinstance(status_code, int) else None
+
+    return ("available", 200) if ("红" in content or "red" in content) else ("unavailable", 200)
 
 
 def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:

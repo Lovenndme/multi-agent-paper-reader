@@ -18,7 +18,7 @@ The repository includes a full-stack web app:
 - Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper
 - Comparison API: `POST /api/comparisons/stream` compares 2-4 saved papers with prefixed evidence, while `/api/comparisons/*` persists comparison workspaces and cross-paper conversations
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
-- Settings API: `GET /api/settings` returns the provider catalog and active routes without exposing credentials; `GET /api/settings/model-health` checks configured providers' remote model catalogs with a server-side TTL cache
+- Settings API: `GET /api/settings` returns the provider catalog and active routes without exposing credentials; `GET /api/settings/model-health` checks text catalogs and uses a minimal real image request to verify vision-model availability, with server-side TTL caching
 - Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded request through the active text model before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 

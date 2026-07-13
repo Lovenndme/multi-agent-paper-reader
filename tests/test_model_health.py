@@ -25,8 +25,30 @@ class _FakeModels:
 
 
 class _FakeClient:
-    def __init__(self, model_ids: list[str] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        model_ids: list[str] | None = None,
+        error: Exception | None = None,
+        vision_error: Exception | None = None,
+        vision_content: str = "红色",
+    ):
         self.models = _FakeModels(model_ids, error)
+        self.chat = SimpleNamespace(
+            completions=_FakeVisionCompletions(vision_content, vision_error)
+        )
+
+
+class _FakeVisionCompletions:
+    def __init__(self, content: str, error: Exception | None = None):
+        self.content = content
+        self.error = error
+
+    def create(self, **_kwargs):
+        if self.error:
+            raise self.error
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+        )
 
 
 class _StatusError(RuntimeError):
@@ -70,9 +92,10 @@ class TestModelCatalogHealth(unittest.TestCase):
         qwen_health = next(item for item in first["providers"] if item["id"] == "qwen")
         self.assertEqual(qwen_health["status"], "ok")
         self.assertEqual(qwen_health["vision_catalog_check"], "verified")
+        self.assertEqual(qwen_health["vision_probe_status"], "available")
         self.assertEqual(qwen_health["missing_text_models"], [])
         self.assertTrue(second["cached"])
-        openai_client.assert_called_once()
+        self.assertEqual(openai_client.call_count, 2)
 
     def test_missing_text_model_reports_drift(self):
         deepseek = PROVIDERS["deepseek"]
@@ -108,7 +131,42 @@ class TestModelCatalogHealth(unittest.TestCase):
         health = next(item for item in payload["providers"] if item["id"] == "zhipu")
         self.assertEqual(health["status"], "ok")
         self.assertEqual(health["vision_catalog_check"], "not_listed")
+        self.assertEqual(health["vision_probe_status"], "available")
+        self.assertEqual(health["vision_probe_model"], "glm-5v-turbo")
         self.assertEqual(health["missing_vision_models"], [])
+        self.assertEqual(
+            health["message"],
+            "文本目录正常；视觉模型 glm-5v-turbo 已通过真实调用，可用。",
+        )
+
+    def test_failed_vision_probe_reports_model_as_unavailable(self):
+        zhipu = PROVIDERS["zhipu"]
+        available = [model.id for model in zhipu.text_models]
+
+        def configured_key(provider_id: str):
+            return "configured-zhipu-key" if provider_id == "zhipu" else None
+
+        with (
+            patch("core.model_health.provider_api_key", side_effect=configured_key),
+            patch(
+                "core.model_health.OpenAI",
+                side_effect=[
+                    _FakeClient(available),
+                    _FakeClient(vision_error=_StatusError(400)),
+                ],
+            ),
+        ):
+            payload = model_catalog_health(force=True)
+
+        health = next(item for item in payload["providers"] if item["id"] == "zhipu")
+        self.assertEqual(health["status"], "unavailable")
+        self.assertEqual(health["vision_probe_status"], "unavailable")
+        self.assertEqual(health["vision_http_status"], 400)
+        self.assertEqual(
+            health["message"],
+            "视觉模型 glm-5v-turbo 真实调用失败，当前不可用。",
+        )
+        self.assertNotIn("secret-do-not-return", repr(payload))
 
     def test_provider_error_is_sanitized(self):
         def configured_key(provider_id: str):

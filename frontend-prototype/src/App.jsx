@@ -1176,11 +1176,11 @@ function SettingsDialog({
             <section className="settings-section model-health-section">
               <header>
                 <div>
-                  <h3>模型目录健康</h3>
+                  <h3>模型可用性</h3>
                   <small>
                     {modelHealth?.checked_at
-                      ? `自动检查于 ${new Date(modelHealth.checked_at).toLocaleString()}`
-                      : "打开 Settings 时自动核对已配置厂商"}
+                      ? `自动验证于 ${new Date(modelHealth.checked_at).toLocaleString()}`
+                      : "打开 Settings 时自动验证已配置厂商；视觉模型会发起最小真实请求"}
                   </small>
                 </div>
                 <button
@@ -1190,7 +1190,7 @@ function SettingsDialog({
                   disabled={healthLoading}
                 >
                   <IconRefresh className={healthLoading ? "spin" : ""} size={15} />
-                  {healthLoading ? "检查中" : "立即检查"}
+                  {healthLoading ? "验证中" : "立即验证"}
                 </button>
               </header>
               {healthError && (
@@ -1204,7 +1204,7 @@ function SettingsDialog({
                   id: provider.id,
                   label: provider.label,
                   status: provider.configured ? "checking" : "unconfigured",
-                  message: provider.configured ? "等待远端检查。" : "未配置 API Key。",
+                  message: provider.configured ? "等待真实验证。" : "未配置 API Key。",
                 }))).map((provider) => {
                   const statusLabels = {
                     ok: "正常",
@@ -1613,10 +1613,10 @@ export function App() {
       const suffix = force ? "?force=true" : "";
       const response = await fetch(`/api/settings/model-health${suffix}`);
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || `模型目录检查失败（HTTP ${response.status}）`);
+      if (!response.ok) throw new Error(payload.detail || `模型可用性验证失败（HTTP ${response.status}）`);
       setSettingsModelHealth(payload);
     } catch (error) {
-      setSettingsHealthError(error instanceof Error ? error.message : "模型目录检查失败。");
+      setSettingsHealthError(error instanceof Error ? error.message : "模型可用性验证失败。");
     } finally {
       setSettingsHealthLoading(false);
     }
