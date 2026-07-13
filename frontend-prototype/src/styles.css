@@ -2461,6 +2461,102 @@ button {
   gap: 3px;
 }
 
+.settings-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.settings-health-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(78, 111, 142, 0.14);
+  border-radius: 8px;
+  background: #f8fbfe;
+}
+
+.settings-health-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-health-card strong {
+  overflow: hidden;
+  color: #17344f;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-health-card span {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  color: #76899a;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.settings-health-card span i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9aabb9;
+}
+
+.settings-health-card > small,
+.settings-health-card > code {
+  display: block;
+  margin-top: 6px;
+  color: rgba(43, 69, 93, 0.58);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.settings-health-card > code {
+  overflow: hidden;
+  color: #ad5f22;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-health-card.ok span {
+  color: #16885c;
+}
+
+.settings-health-card.ok span i {
+  background: #1daf72;
+}
+
+.settings-health-card.drift span,
+.settings-health-card.drift > code {
+  color: #b36a19;
+}
+
+.settings-health-card.drift span i {
+  background: #e7a23a;
+}
+
+.settings-health-card.unavailable span,
+.settings-health-error {
+  color: #b44842;
+}
+
+.settings-health-card.unavailable span i {
+  background: #d75d54;
+}
+
+.settings-health-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  font-size: 10px;
+}
+
 .settings-secondary-action {
   display: inline-flex;
   min-height: 34px;

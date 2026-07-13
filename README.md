@@ -18,7 +18,7 @@ The repository includes a full-stack web app:
 - Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper
 - Comparison API: `POST /api/comparisons/stream` compares 2-4 saved papers with prefixed evidence, while `/api/comparisons/*` persists comparison workspaces and cross-paper conversations
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
-- Settings API: `GET /api/settings` returns the provider catalog and active routes without exposing credentials; provider-specific key and routing endpoints validate and activate local configuration
+- Settings API: `GET /api/settings` returns the provider catalog and active routes without exposing credentials; `GET /api/settings/model-health` checks configured providers' remote model catalogs with a server-side TTL cache
 - Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded request through the active text model before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
@@ -47,6 +47,8 @@ http://127.0.0.1:8000/
 
 For first-time setup, open **Settings** in the top-right navigation. Text analysis supports Zhipu GLM, DeepSeek, OpenAI, Alibaba Qwen, and ByteDance Doubao, with multiple curated models for every provider. OpenAI choices are intentionally limited to the GPT-5.6 Sol, Terra, and Luna series. Doubao uses the Volcengine Ark OpenAI-compatible endpoint and offers Seed 2.0 Pro, Lite, and Mini routes. Vision is automatically paired with the selected text provider and cannot be routed to a different vendor, so one verified API key covers the active text and vision route. DeepSeek publishes open-source vision-language models, but its hosted cloud API currently lists only text models; selecting DeepSeek therefore disables rendered-image understanding while preserving PDF text, table, caption, agent-analysis, and follow-up-chat workflows. Users who need hosted figure understanding must switch the entire active route to Zhipu, OpenAI, Qwen, or Doubao. Self-hosted DeepSeek-VL endpoints are not integrated yet. Each provider has its own API key and editable Base URL. A route cannot be activated until that provider's key has been validated and saved locally; no saved key is ever returned to the browser.
 
+Opening Settings automatically checks the remote `/models` catalog for every configured provider. Results are cached on the server, can be refreshed on demand, and report only endpoint status, model counts, and missing catalog IDs. Credentials and raw provider errors never leave the backend. Providers that omit vision models from `/models` are shown transparently as text-catalog verified instead of producing a false vision-drift warning.
+
 The default route remains Zhipu `glm-5.2` for text and its automatic `glm-5v-turbo` vision pairing. You can also copy `.env.example` to `.env` and configure `TEXT_PROVIDER`, `MODEL_NAME`, and provider-specific keys manually. `VISION_PROVIDER` is retained for backward compatibility but is normalized to `TEXT_PROVIDER`; the vision model is always the catalog's recommended model for that provider. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`). `CHAT_INPUT_TOKEN_BUDGET` sets the conservative dynamic input budget used to balance evidence, recent turns, and long-term memory (default `48000`).
 
 For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and select a text provider that offers a hosted vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the paired vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
@@ -60,6 +62,16 @@ copy .env.example .env
 
 python main.py examples/your_paper.pdf --pretty
 ```
+
+## Validation
+
+Every push to `main` runs backend tests and a Vite production build on macOS, Windows, and Ubuntu through `.github/workflows/ci.yml`. For credentialed release checks, `tools/provider_smoke.py` performs both a minimal real request and an evidence-citing paper follow-up through the application chat path while printing only non-secret trace fields:
+
+```bash
+python tools/provider_smoke.py openai deepseek doubao
+```
+
+The same check is available as the manually triggered `Live provider smoke tests` workflow when `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, and `ARK_API_KEY` repository secrets are configured.
 
 ## Architecture
 

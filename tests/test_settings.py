@@ -32,7 +32,7 @@ class TestApplicationSettings(unittest.TestCase):
             payload = application_settings_payload()
 
         self.assertTrue(payload["api_key_configured"])
-        self.assertEqual(payload["version"], "V1.2.0")
+        self.assertEqual(payload["version"], "V1.2.1")
         self.assertEqual(payload["routing"]["text"]["model_label"], "GLM-5.2")
         self.assertEqual(
             {provider["id"] for provider in payload["providers"]},
@@ -63,6 +63,23 @@ class TestApplicationSettings(unittest.TestCase):
         model_ids = [model.id for model in PROVIDERS["openai"].text_models]
 
         self.assertEqual(model_ids, ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna"])
+
+    def test_zhipu_text_catalog_matches_live_model_list(self):
+        model_ids = [model.id for model in PROVIDERS["zhipu"].text_models]
+
+        self.assertEqual(
+            model_ids,
+            [
+                "glm-5.2",
+                "glm-5.1",
+                "glm-5",
+                "glm-5-turbo",
+                "glm-4.7",
+                "glm-4.6",
+                "glm-4.5-air",
+                "glm-4.5",
+            ],
+        )
 
     def test_doubao_catalog_exposes_three_multimodal_seed_models(self):
         provider = PROVIDERS["doubao"]

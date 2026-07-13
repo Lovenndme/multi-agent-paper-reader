@@ -68,10 +68,9 @@ PROVIDERS: dict[str, ProviderSpec] = {
             ModelSpec("glm-5", "GLM-5", "上一代旗舰文本模型", tags=("通用",)),
             ModelSpec("glm-5-turbo", "GLM-5 Turbo", "低延迟 GLM-5 系列模型", tags=("高速",)),
             ModelSpec("glm-4.7", "GLM-4.7", "稳定的复杂任务模型", tags=("稳定",)),
-            ModelSpec("glm-4.7-flashx", "GLM-4.7 FlashX", "高吞吐低延迟模型", tags=("高速",)),
             ModelSpec("glm-4.6", "GLM-4.6", "通用文本与工具调用模型", tags=("通用",)),
             ModelSpec("glm-4.5-air", "GLM-4.5 Air", "轻量高性价比模型", tags=("轻量",)),
-            ModelSpec("glm-4-long", "GLM-4 Long", "面向长上下文任务", tags=("长上下文",)),
+            ModelSpec("glm-4.5", "GLM-4.5", "上一代通用基座模型", tags=("通用",)),
         ),
         vision_models=(
             ModelSpec(
@@ -84,8 +83,8 @@ PROVIDERS: dict[str, ProviderSpec] = {
             ModelSpec("glm-4.6v", "GLM-4.6V", "高精度视觉理解模型", tags=("视觉",)),
             ModelSpec("glm-4.6v-flash", "GLM-4.6V Flash", "低延迟视觉理解模型", tags=("高速",)),
             ModelSpec(
-                "glm-4.1v-thinking-flashx",
-                "GLM-4.1V Thinking FlashX",
+                "glm-4.1v-thinking",
+                "GLM-4.1V Thinking",
                 "视觉推理增强模型",
                 tags=("推理",),
             ),

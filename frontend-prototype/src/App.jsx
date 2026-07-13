@@ -30,6 +30,7 @@ import {
   IconPlus,
   IconPhoto,
   IconQuote,
+  IconRefresh,
   IconSearch,
   IconSend,
   IconSettings,
@@ -1089,6 +1090,9 @@ function SettingsDialog({
   status,
   loading,
   error,
+  modelHealth,
+  healthLoading,
+  healthError,
   routing,
   credentialProvider,
   baseUrl,
@@ -1103,6 +1107,7 @@ function SettingsDialog({
   onApiKeyChange,
   onToggleApiKey,
   onSaveApiKey,
+  onRefreshHealth,
   onRetry,
   onClose,
 }) {
@@ -1158,7 +1163,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.2.0"}</strong>
+                <strong>{status.version || "V1.2.1"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1167,6 +1172,66 @@ function SettingsDialog({
                 </span>
               </div>
             </div>
+
+            <section className="settings-section model-health-section">
+              <header>
+                <div>
+                  <h3>模型目录健康</h3>
+                  <small>
+                    {modelHealth?.checked_at
+                      ? `自动检查于 ${new Date(modelHealth.checked_at).toLocaleString()}`
+                      : "打开 Settings 时自动核对已配置厂商"}
+                  </small>
+                </div>
+                <button
+                  className="settings-secondary-action"
+                  type="button"
+                  onClick={onRefreshHealth}
+                  disabled={healthLoading}
+                >
+                  <IconRefresh className={healthLoading ? "spin" : ""} size={15} />
+                  {healthLoading ? "检查中" : "立即检查"}
+                </button>
+              </header>
+              {healthError && (
+                <div className="settings-health-error" role="status">
+                  <IconAlertCircle size={15} />
+                  <span>{healthError}</span>
+                </div>
+              )}
+              <div className="settings-health-grid" aria-busy={healthLoading}>
+                {(modelHealth?.providers || providers.map((provider) => ({
+                  id: provider.id,
+                  label: provider.label,
+                  status: provider.configured ? "checking" : "unconfigured",
+                  message: provider.configured ? "等待远端检查。" : "未配置 API Key。",
+                }))).map((provider) => {
+                  const statusLabels = {
+                    ok: "正常",
+                    drift: "目录变化",
+                    unavailable: "不可用",
+                    unconfigured: "未配置",
+                    checking: "等待检查",
+                  };
+                  const missingModels = [
+                    ...(provider.missing_text_models || []),
+                    ...(provider.missing_vision_models || []),
+                  ];
+                  return (
+                    <article className={`settings-health-card ${provider.status}`} key={provider.id}>
+                      <div>
+                        <strong>{provider.label}</strong>
+                        <span><i /> {statusLabels[provider.status] || provider.status}</span>
+                      </div>
+                      <small>{provider.message}</small>
+                      {missingModels.length > 0 && (
+                        <code title={missingModels.join(", ")}>缺失：{missingModels.join(", ")}</code>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
 
             <section className="settings-section model-routing-section">
               <header>
@@ -1351,6 +1416,9 @@ export function App() {
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  const [settingsModelHealth, setSettingsModelHealth] = useState(null);
+  const [settingsHealthLoading, setSettingsHealthLoading] = useState(false);
+  const [settingsHealthError, setSettingsHealthError] = useState("");
   const [settingsRouting, setSettingsRouting] = useState(defaultSettingsRouting);
   const [settingsCredentialProvider, setSettingsCredentialProvider] = useState("zhipu");
   const [settingsBaseUrl, setSettingsBaseUrl] = useState("");
@@ -1537,6 +1605,23 @@ export function App() {
     }
   }
 
+  async function loadModelHealth(force = false) {
+    if (settingsHealthLoading) return;
+    setSettingsHealthLoading(true);
+    setSettingsHealthError("");
+    try {
+      const suffix = force ? "?force=true" : "";
+      const response = await fetch(`/api/settings/model-health${suffix}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `模型目录检查失败（HTTP ${response.status}）`);
+      setSettingsModelHealth(payload);
+    } catch (error) {
+      setSettingsHealthError(error instanceof Error ? error.message : "模型目录检查失败。");
+    } finally {
+      setSettingsHealthLoading(false);
+    }
+  }
+
   function openApplicationSettings() {
     setHistoryOpen(false);
     setWorkspaceMenuOpen(false);
@@ -1546,6 +1631,7 @@ export function App() {
     setSettingsFeedback(null);
     setSettingsOpen(true);
     void loadApplicationSettings();
+    void loadModelHealth();
   }
 
   function closeApplicationSettings() {
@@ -1662,6 +1748,7 @@ export function App() {
           ? `API Key 已验证并保存，同时识别到 ${discoveredCount} 个可用模型。`
           : "API Key 已通过真实请求验证并保存。",
       });
+      void loadModelHealth(true);
     } catch (error) {
       setSettingsFeedback({
         scope: "credential",
@@ -2690,6 +2777,9 @@ export function App() {
           status={settingsStatus}
           loading={settingsLoading}
           error={settingsError}
+          modelHealth={settingsModelHealth}
+          healthLoading={settingsHealthLoading}
+          healthError={settingsHealthError}
           routing={settingsRouting}
           credentialProvider={settingsCredentialProvider}
           baseUrl={settingsBaseUrl}
@@ -2710,6 +2800,7 @@ export function App() {
           }}
           onToggleApiKey={() => setSettingsApiKeyVisible((value) => !value)}
           onSaveApiKey={saveApplicationApiKey}
+          onRefreshHealth={() => void loadModelHealth(true)}
           onRetry={() => void loadApplicationSettings()}
           onClose={closeApplicationSettings}
         />

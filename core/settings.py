@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 from openai import OpenAI
 from pydantic import BaseModel, SecretStr
 
+from core.model_health import invalidate_model_catalog_health_cache
 from core.model_providers import (
     PROVIDERS,
     provider_api_key,
@@ -32,7 +33,7 @@ from utils.llm import is_llm_configured, is_vision_configured, reset_llm_clients
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", PROJECT_ROOT / ".env"))
-PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.2.0")
+PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.2.1")
 _SETTINGS_LOCK = threading.Lock()
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
@@ -186,6 +187,7 @@ def configure_provider_api_key(
         os.environ[spec.api_key_env] = clean_key
         os.environ[spec.base_url_env] = clean_base_url
         reset_llm_clients()
+        invalidate_model_catalog_health_cache()
 
     payload = application_settings_payload()
     payload["validation"] = {
@@ -211,6 +213,7 @@ def configure_glm_api_key(
         _persist_env_values({"GLM_API_KEY": clean_key}, env_path)
         os.environ["GLM_API_KEY"] = clean_key
         reset_llm_clients()
+        invalidate_model_catalog_health_cache()
     return application_settings_payload()
 
 
@@ -263,6 +266,7 @@ def configure_model_routing(
         _persist_env_values(values, env_path)
         os.environ.update(values)
         reset_llm_clients()
+        invalidate_model_catalog_health_cache()
 
     return application_settings_payload()
 

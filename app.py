@@ -82,6 +82,7 @@ from core.history import (
     paper_history_exists,
     save_paper_analysis,
 )
+from core.model_health import model_catalog_health
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.model_providers import (
     provider_spec,
@@ -947,6 +948,14 @@ def health() -> dict[str, Any]:
 def application_settings() -> dict[str, Any]:
     """Return public model and version information for the settings dialog."""
     return application_settings_payload()
+
+
+@app.get("/api/settings/model-health")
+def application_model_health(
+    force: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Check configured provider catalogs without exposing credentials."""
+    return model_catalog_health(force=force)
 
 
 @app.post("/api/settings/api-key")
