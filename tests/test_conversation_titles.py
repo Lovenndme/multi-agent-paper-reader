@@ -20,8 +20,10 @@ class TestConversationTitles(unittest.TestCase):
         self.assertIn("GRPO", title)
 
     def test_model_title_is_cleaned_and_keeps_compact_summary(self):
+        fake_llm = SimpleNamespace(bind=lambda **_: "fake-bound-chat-client")
         with (
             patch("core.conversation_titles.is_llm_configured", return_value=True),
+            patch("core.conversation_titles.get_chat_llm", return_value=fake_llm),
             patch(
                 "core.conversation_titles.invoke_with_retry",
                 return_value=SimpleNamespace(content="会话标题：GRPO 奖励机制解析？"),
