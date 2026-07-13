@@ -70,15 +70,47 @@ class TestPaperChat(unittest.TestCase):
         self.assertNotIn("api_key", compact)
 
     def test_demo_reply_mentions_selected_text_and_live_model(self):
-        reply = demo_chat_reply(
-            PaperChatRequest(
-                question="解释一下",
-                selected_text="一段需要解释的论文结论",
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "qwen",
+                "MODEL_NAME": "qwen3.7-max",
+                "DASHSCOPE_API_KEY": "configured-qwen-key",
+            },
+            clear=True,
+        ):
+            reply = demo_chat_reply(
+                PaperChatRequest(
+                    question="解释一下",
+                    selected_text="一段需要解释的论文结论",
+                )
             )
-        )
 
         self.assertIn("一段需要解释的论文结论", reply)
-        self.assertIn("GLM-5.2", reply)
+        self.assertIn("Alibaba Qwen / Qwen3.7 Max", reply)
+
+    def test_prompt_treats_server_call_details_as_model_identity_source(self):
+        request = PaperChatRequest(
+            question="你是什么模型？",
+            history=[
+                ChatHistoryTurn(role="assistant", content="我是 GLM 模型。"),
+            ],
+            context={"paper": {"title": "Test"}},
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "qwen",
+                "MODEL_NAME": "qwen3.7-max",
+                "DASHSCOPE_API_KEY": "configured-qwen-key",
+            },
+            clear=True,
+        ):
+            messages = build_chat_messages(request)
+
+        self.assertNotIn("Alibaba Qwen / Qwen3.7 Max", messages[0].content)
+        self.assertIn("以本条回答下方的服务端调用详情为准", messages[0].content)
 
     def test_session_retrieval_uses_complete_relevant_evidence(self):
         snippets = [

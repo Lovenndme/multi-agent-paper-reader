@@ -41,6 +41,7 @@ import {
 } from "@tabler/icons-react";
 import avatarUrl from "./assets/avatar.png";
 import { ComparisonWorkspace, comparisonMarkdownFromData } from "./ComparisonWorkspace.jsx";
+import { ModelCallTrace } from "./ModelCallTrace.jsx";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
 import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
 
@@ -67,6 +68,14 @@ const completeAgentStates = {
   experiment: "complete",
   critic: "complete",
   summary: "complete",
+};
+
+const defaultSettingsRouting = {
+  text_provider: "zhipu",
+  text_model: "glm-5.2",
+  vision_enabled: true,
+  vision_provider: "zhipu",
+  vision_model: "glm-5v-turbo",
 };
 
 const agentStepLabels = ["阅读章节", "提取洞察", "完成输出"];
@@ -814,6 +823,7 @@ function analysisContextForChat(data) {
 
 function PaperChatDrawer({
   paperTitle,
+  modelLabel = "论文研究助手",
   conversations,
   activeConversationId,
   messages,
@@ -1012,7 +1022,7 @@ function PaperChatDrawer({
         {!isConversationLoading && !messages.length && (
           <div className="chat-empty">
             <IconMessageCircle size={24} stroke={1.5} />
-            <strong>GLM-5.2</strong>
+            <strong>{modelLabel}</strong>
           </div>
         )}
         {messages.map((message) => (
@@ -1031,6 +1041,7 @@ function PaperChatDrawer({
             ) : (
               <span className="chat-typing" aria-label="正在生成"><i /><i /><i /></span>
             )}
+            {message.role === "assistant" && <ModelCallTrace trace={message.model_trace} />}
           </article>
         ))}
       </div>
@@ -1078,16 +1089,29 @@ function SettingsDialog({
   status,
   loading,
   error,
+  routing,
+  credentialProvider,
+  baseUrl,
   apiKey,
   apiKeyVisible,
   saving,
   feedback,
+  onRoutingChange,
+  onSaveRouting,
+  onCredentialProviderChange,
+  onBaseUrlChange,
   onApiKeyChange,
   onToggleApiKey,
-  onSave,
+  onSaveApiKey,
   onRetry,
   onClose,
 }) {
+  const providers = status?.providers || [];
+  const textProvider = providers.find((provider) => provider.id === routing.text_provider) || providers[0];
+  const visionProvider = textProvider;
+  const credential = providers.find((provider) => provider.id === credentialProvider) || providers[0];
+  const configuredProviderCount = providers.filter((provider) => provider.configured).length;
+
   return (
     <div
       className="settings-backdrop"
@@ -1134,48 +1158,143 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.1.2"}</strong>
+                <strong>{status.version || "V1.2.0"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
-                <span className={status.api_key_configured ? "configured" : "unconfigured"}>
-                  <i /> {status.api_key_configured ? "已配置" : "待配置"}
+                <span className={configuredProviderCount ? "configured" : "unconfigured"}>
+                  <i /> {configuredProviderCount} / {providers.length} 个厂商已配置
                 </span>
               </div>
             </div>
 
-            <section className="settings-section">
+            <section className="settings-section model-routing-section">
               <header>
-                <h3>当前模型</h3>
-                <small>{status.provider}</small>
+                <div>
+                  <h3>模型路由</h3>
+                  <small>视觉理解自动跟随文本厂商</small>
+                </div>
+                <button
+                  className="settings-secondary-action"
+                  type="button"
+                  onClick={onSaveRouting}
+                  disabled={saving || !routing.text_model}
+                >
+                  {saving && feedback?.scope === "routing" ? <IconLoader2 className="spin" size={15} /> : <IconCheck size={15} />}
+                  应用配置
+                </button>
               </header>
-              <div className="settings-model-list">
-                {(status.models || []).map((model) => (
-                  <div className="settings-model-row" key={model.id}>
-                    <span className={`model-kind ${model.id}`}>
-                      {model.id === "vision" ? <IconPhoto size={18} /> : <IconCpu size={18} />}
-                    </span>
-                    <div>
-                      <strong>{model.label}</strong>
-                      <small>{model.purpose}</small>
-                    </div>
-                    <code>{model.name}</code>
-                    <span className={`model-state ${model.configured ? "configured" : "unconfigured"}`}>
-                      <i /> {model.configured ? "已配置" : "未配置"}
-                    </span>
+              <div className="settings-route-list">
+                <div className="settings-route-row">
+                  <span className="model-kind text"><IconCpu size={18} /></span>
+                  <div className="settings-route-copy">
+                    <strong>文本分析</strong>
+                    <small>Agent 分析、总结与论文追问</small>
                   </div>
-                ))}
+                  <label>
+                    <span>厂商</span>
+                    <select
+                      value={routing.text_provider}
+                      onChange={(event) => onRoutingChange("text_provider", event.target.value)}
+                      disabled={saving}
+                    >
+                      {providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span>模型</span>
+                    <select
+                      value={routing.text_model}
+                      onChange={(event) => onRoutingChange("text_model", event.target.value)}
+                      disabled={saving}
+                    >
+                      {(textProvider?.text_models || []).map((model) => (
+                        <option value={model.id} key={model.id}>{model.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <span className={`model-state ${textProvider?.configured ? "configured" : "unconfigured"}`}>
+                    <i /> {textProvider?.configured ? "Key 已配置" : "缺少 Key"}
+                  </span>
+                </div>
+
+                <div className={`settings-route-row vision-route ${routing.vision_enabled ? "" : "disabled"}`}>
+                  <span className="model-kind vision"><IconPhoto size={18} /></span>
+                  <div className="settings-route-copy">
+                    <strong>图表理解</strong>
+                    <small>{visionProvider?.supports_vision ? "论文图像、图表与公式区域" : "官方云 API 暂不支持图像输入"}</small>
+                  </div>
+                  <label>
+                    <span>厂商</span>
+                    <div className="settings-locked-field">
+                      <strong>{visionProvider?.label || "未选择"}</strong>
+                      <small>跟随文本</small>
+                    </div>
+                  </label>
+                  <label>
+                    <span>模型</span>
+                    <div className="settings-locked-field model">
+                      <strong>{routing.vision_model || "官方云 API 暂不支持"}</strong>
+                      <small>{routing.vision_model ? "自动配对" : "文本可用"}</small>
+                    </div>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={routing.vision_enabled}
+                      onChange={(event) => onRoutingChange("vision_enabled", event.target.checked)}
+                      disabled={saving || !visionProvider?.supports_vision}
+                    />
+                    <span aria-hidden="true" />
+                    启用
+                  </label>
+                </div>
               </div>
+              {feedback?.scope === "routing" && feedback.message && (
+                <div className={`settings-feedback ${feedback.tone}`} role="status">
+                  {feedback.tone === "success" ? <IconCheck size={16} /> : <IconAlertCircle size={16} />}
+                  <span>{feedback.message}</span>
+                </div>
+              )}
             </section>
 
             <section className="settings-section api-key-section">
               <header>
-                <h3>GLM API Key</h3>
-                <a href="https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank" rel="noreferrer">
+                <div>
+                  <h3>厂商凭据</h3>
+                  <small>密钥按厂商分别保存在本机</small>
+                </div>
+                <a href={credential?.key_url} target="_blank" rel="noreferrer">
                   获取 Key <IconExternalLink size={13} />
                 </a>
               </header>
-              <form onSubmit={onSave}>
+              <form onSubmit={onSaveApiKey}>
+                <div className="settings-credential-grid">
+                  <label>
+                    <span>模型厂商</span>
+                    <select
+                      value={credentialProvider}
+                      onChange={(event) => onCredentialProviderChange(event.target.value)}
+                      disabled={saving}
+                    >
+                      {providers.map((provider) => (
+                        <option value={provider.id} key={provider.id}>
+                          {provider.label}{provider.configured ? " · 已配置" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Base URL</span>
+                    <input
+                      type="url"
+                      value={baseUrl}
+                      onChange={(event) => onBaseUrlChange(event.target.value)}
+                      disabled={saving}
+                      spellCheck="false"
+                    />
+                  </label>
+                </div>
                 <label htmlFor="settings-api-key">API Key</label>
                 <div className="settings-key-input">
                   <IconKey size={17} stroke={1.8} />
@@ -1185,7 +1304,7 @@ function SettingsDialog({
                     value={apiKey}
                     autoComplete="off"
                     spellCheck="false"
-                    placeholder={status.api_key_configured ? "粘贴新的 Key 以替换当前配置" : "粘贴智谱 GLM API Key"}
+                    placeholder={credential?.configured ? `粘贴新的 Key 以替换 ${credential.label} 配置` : `粘贴 ${credential?.label || "厂商"} API Key`}
                     onChange={(event) => onApiKeyChange(event.target.value)}
                     disabled={saving}
                   />
@@ -1202,11 +1321,11 @@ function SettingsDialog({
                 <div className="settings-key-footer">
                   <small>仅写入本机 <code>.env</code>，保存后不会回显。</small>
                   <button type="submit" disabled={apiKey.trim().length < 10 || saving}>
-                    {saving ? <IconLoader2 className="spin" size={16} /> : <IconShieldCheck size={16} />}
-                    {saving ? "正在验证" : "验证并保存"}
+                    {saving && feedback?.scope === "credential" ? <IconLoader2 className="spin" size={16} /> : <IconShieldCheck size={16} />}
+                    {saving && feedback?.scope === "credential" ? "正在验证" : "验证并保存"}
                   </button>
                 </div>
-                {feedback?.message && (
+                {feedback?.scope === "credential" && feedback.message && (
                   <div className={`settings-feedback ${feedback.tone}`} role="status">
                     {feedback.tone === "success" ? <IconCheck size={16} /> : <IconAlertCircle size={16} />}
                     <span>{feedback.message}</span>
@@ -1232,6 +1351,9 @@ export function App() {
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  const [settingsRouting, setSettingsRouting] = useState(defaultSettingsRouting);
+  const [settingsCredentialProvider, setSettingsCredentialProvider] = useState("zhipu");
+  const [settingsBaseUrl, setSettingsBaseUrl] = useState("");
   const [settingsApiKey, setSettingsApiKey] = useState("");
   const [settingsApiKeyVisible, setSettingsApiKeyVisible] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -1268,6 +1390,7 @@ export function App() {
 
   useEffect(() => {
     void loadPaperHistory();
+    void loadApplicationSettings();
     return () => chatAbortRef.current?.abort();
   }, []);
 
@@ -1297,6 +1420,9 @@ export function App() {
 
   const displayedData = analysisData || sampleAnalysis;
   const displayedPaper = displayedData.paper;
+  const activeModelLabel = settingsStatus?.routing?.text?.model_label
+    || settingsStatus?.routing?.text?.model
+    || "论文研究助手";
   const hasFinalAnalysis = Boolean(
     displayedData.method_output &&
       displayedData.experiment_output &&
@@ -1389,7 +1515,21 @@ export function App() {
     try {
       const response = await fetch("/api/settings");
       if (!response.ok) throw new Error(`Settings request failed（HTTP ${response.status}）`);
-      setSettingsStatus(await response.json());
+      const payload = await response.json();
+      const textRoute = payload.routing?.text;
+      const visionRoute = payload.routing?.vision;
+      const initialCredentialProvider = textRoute?.provider || payload.providers?.[0]?.id || "zhipu";
+      const initialCredential = payload.providers?.find((provider) => provider.id === initialCredentialProvider);
+      setSettingsStatus(payload);
+      setSettingsRouting({
+        text_provider: textRoute?.provider || "zhipu",
+        text_model: textRoute?.model || "glm-5.2",
+        vision_enabled: Boolean(visionRoute?.enabled && initialCredential?.supports_vision),
+        vision_provider: textRoute?.provider || "zhipu",
+        vision_model: initialCredential?.default_vision_model || "",
+      });
+      setSettingsCredentialProvider(initialCredentialProvider);
+      setSettingsBaseUrl(initialCredential?.base_url || "");
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "无法读取应用配置。");
     } finally {
@@ -1401,6 +1541,7 @@ export function App() {
     setHistoryOpen(false);
     setWorkspaceMenuOpen(false);
     setSettingsApiKey("");
+    setSettingsBaseUrl("");
     setSettingsApiKeyVisible(false);
     setSettingsFeedback(null);
     setSettingsOpen(true);
@@ -1415,26 +1556,115 @@ export function App() {
     setSettingsFeedback(null);
   }
 
+  function changeSettingsRouting(field, value) {
+    if (field === "text_provider") {
+      const provider = settingsStatus?.providers?.find((item) => item.id === value);
+      setSettingsCredentialProvider(value);
+      setSettingsBaseUrl(provider?.base_url || "");
+      setSettingsApiKey("");
+      setSettingsApiKeyVisible(false);
+    }
+    setSettingsRouting((current) => {
+      if (field === "text_provider") {
+        const provider = settingsStatus?.providers?.find((item) => item.id === value);
+        return {
+          ...current,
+          text_provider: value,
+          text_model: provider?.default_text_model || "",
+          vision_provider: value,
+          vision_model: provider?.default_vision_model || "",
+          vision_enabled: Boolean(provider?.supports_vision),
+        };
+      }
+      return { ...current, [field]: value };
+    });
+    setSettingsFeedback(null);
+  }
+
+  function changeSettingsCredentialProvider(providerId) {
+    const provider = settingsStatus?.providers?.find((item) => item.id === providerId);
+    setSettingsCredentialProvider(providerId);
+    setSettingsBaseUrl(provider?.base_url || "");
+    setSettingsApiKey("");
+    setSettingsApiKeyVisible(false);
+    setSettingsFeedback(null);
+  }
+
+  async function saveApplicationRouting() {
+    if (settingsSaving) return;
+    const selectedProvider = settingsStatus?.providers?.find(
+      (provider) => provider.id === settingsRouting.text_provider,
+    );
+    if (!selectedProvider?.configured) {
+      setSettingsCredentialProvider(settingsRouting.text_provider);
+      setSettingsBaseUrl(selectedProvider?.base_url || "");
+      setSettingsFeedback({
+        scope: "routing",
+        tone: "error",
+        message: `请先在下方配置并验证 ${selectedProvider?.label || "当前厂商"} API Key。`,
+      });
+      return;
+    }
+    const synchronizedRouting = {
+      ...settingsRouting,
+      vision_enabled: Boolean(settingsRouting.vision_enabled && selectedProvider.supports_vision),
+      vision_provider: settingsRouting.text_provider,
+      vision_model: selectedProvider.default_vision_model || "",
+    };
+    setSettingsSaving(true);
+    setSettingsFeedback({ scope: "routing", tone: "neutral", message: "正在应用模型配置..." });
+    try {
+      const response = await fetch("/api/settings/routing", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(synchronizedRouting),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `模型配置保存失败（HTTP ${response.status}）`);
+      setSettingsStatus(payload.settings);
+      setSettingsRouting(synchronizedRouting);
+      setSettingsFeedback({ scope: "routing", tone: "success", message: "模型路由已保存并立即生效。" });
+    } catch (error) {
+      setSettingsFeedback({
+        scope: "routing",
+        tone: "error",
+        message: error instanceof Error ? error.message : "模型配置保存失败。",
+      });
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
   async function saveApplicationApiKey(event) {
     event.preventDefault();
     const apiKey = settingsApiKey.trim();
     if (apiKey.length < 10 || settingsSaving) return;
     setSettingsSaving(true);
-    setSettingsFeedback(null);
+    setSettingsFeedback({ scope: "credential", tone: "neutral", message: "正在验证厂商凭据..." });
     try {
-      const response = await fetch("/api/settings/api-key", {
+      const response = await fetch(`/api/settings/providers/${encodeURIComponent(settingsCredentialProvider)}/api-key`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKey }),
+        body: JSON.stringify({ api_key: apiKey, base_url: settingsBaseUrl.trim() }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `API Key 保存失败（HTTP ${response.status}）`);
       setSettingsStatus(payload.settings);
+      const updatedProvider = payload.settings?.providers?.find((provider) => provider.id === settingsCredentialProvider);
+      setSettingsBaseUrl(updatedProvider?.base_url || settingsBaseUrl);
       setSettingsApiKey("");
       setSettingsApiKeyVisible(false);
-      setSettingsFeedback({ tone: "success", message: "API Key 已验证并保存，模型服务现已可用。" });
+      const discoveredCount = payload.settings?.validation?.available_model_count || 0;
+      setSettingsFeedback({
+        scope: "credential",
+        tone: "success",
+        message: discoveredCount
+          ? `API Key 已验证并保存，同时识别到 ${discoveredCount} 个可用模型。`
+          : "API Key 已通过真实请求验证并保存。",
+      });
     } catch (error) {
       setSettingsFeedback({
+        scope: "credential",
         tone: "error",
         message: error instanceof Error ? error.message : "API Key 验证失败。",
       });
@@ -1847,7 +2077,11 @@ export function App() {
         message.id === userId && completionEvent?.user_message
           ? completionEvent.user_message
           : message.id === assistantId
-            ? completionEvent?.assistant_message || { ...message, content: answer }
+            ? completionEvent?.assistant_message || {
+              ...message,
+              content: answer,
+              model_trace: completionEvent?.model_trace || null,
+            }
             : message
       )));
       if (completionEvent?.conversation_id) {
@@ -2216,6 +2450,7 @@ export function App() {
           historyError={historyError}
           showToast={showToast}
           onResultChange={setComparisonData}
+          modelLabel={activeModelLabel}
           onAddPaper={() => {
             setWorkspaceMode("reading");
             window.setTimeout(() => fileInputRef.current?.click(), 80);
@@ -2428,6 +2663,7 @@ export function App() {
           {chatOpen && (
             <PaperChatDrawer
               paperTitle={displayedPaper.title || "当前论文"}
+              modelLabel={activeModelLabel}
               conversations={chatConversations}
               activeConversationId={activeConversationId}
               messages={chatMessages}
@@ -2454,16 +2690,26 @@ export function App() {
           status={settingsStatus}
           loading={settingsLoading}
           error={settingsError}
+          routing={settingsRouting}
+          credentialProvider={settingsCredentialProvider}
+          baseUrl={settingsBaseUrl}
           apiKey={settingsApiKey}
           apiKeyVisible={settingsApiKeyVisible}
           saving={settingsSaving}
           feedback={settingsFeedback}
+          onRoutingChange={changeSettingsRouting}
+          onSaveRouting={() => void saveApplicationRouting()}
+          onCredentialProviderChange={changeSettingsCredentialProvider}
+          onBaseUrlChange={(value) => {
+            setSettingsBaseUrl(value);
+            if (settingsFeedback) setSettingsFeedback(null);
+          }}
           onApiKeyChange={(value) => {
             setSettingsApiKey(value);
             if (settingsFeedback) setSettingsFeedback(null);
           }}
           onToggleApiKey={() => setSettingsApiKeyVisible((value) => !value)}
-          onSave={saveApplicationApiKey}
+          onSaveApiKey={saveApplicationApiKey}
           onRetry={() => void loadApplicationSettings()}
           onClose={closeApplicationSettings}
         />

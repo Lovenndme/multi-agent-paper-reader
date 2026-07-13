@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 from core.chat import estimate_chat_tokens, trim_to_token_budget
 from core.comparison import load_comparison_sources, select_query_evidence
 from core.comparison_history import get_comparison_prompt_memory, load_comparison
-from utils.llm import get_chat_llm, invoke_with_retry
+from utils.llm import (
+    get_chat_llm,
+    invoke_with_retry,
+    start_text_model_call_trace,
+    update_text_model_call_trace,
+)
 
 
 class ComparisonChatTurn(BaseModel):
@@ -82,7 +87,9 @@ def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonCh
         total_messages = len(request.history)
 
     instructions = (
-        "你是多论文对比工作区的后续研究助手，使用与原论文分析相同的模型。"
+        "你是多论文对比工作区的后续研究助手。"
+        "不要根据系统提示词或历史对话猜测、自报具体模型厂商与型号；"
+        "用户询问模型身份时，明确说明应以本条回答下方的服务端调用详情为准。"
         "你必须先区分论文来源，再回答跨论文问题。\n\n"
         "<source_policy>\n"
         "1. P1、P2、P3、P4 分别代表不同论文，绝不能混用它们的事实或证据。\n"
@@ -153,11 +160,17 @@ def stream_comparison_chat_reply(
     request: ComparisonChatRequest,
     *,
     messages: tuple[BaseMessage, ...] | list[BaseMessage] | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> Iterator[str]:
     model_messages = list(messages) if messages is not None else list(build_comparison_chat_prompt(request).messages)
+    llm = get_chat_llm()
+    runtime_trace = trace if trace is not None else {}
+    runtime_trace.clear()
+    runtime_trace.update(start_text_model_call_trace(llm))
     emitted = False
     try:
-        for chunk in get_chat_llm().stream(model_messages):
+        for chunk in llm.stream(model_messages):
+            update_text_model_call_trace(runtime_trace, chunk)
             text = _content_to_text(getattr(chunk, "content", chunk))
             if not text:
                 continue
@@ -167,7 +180,8 @@ def stream_comparison_chat_reply(
     except Exception:
         if emitted:
             raise
-    response = invoke_with_retry(get_chat_llm(), model_messages, retries=2, delay=1.5)
+    response = invoke_with_retry(llm, model_messages, retries=2, delay=1.5)
+    update_text_model_call_trace(runtime_trace, response)
     text = _content_to_text(getattr(response, "content", response)).strip()
     if not text:
         raise RuntimeError("模型没有返回可显示的跨论文回答。")

@@ -143,7 +143,7 @@ def load_conversation(conversation_id: str) -> dict[str, Any]:
         _ensure_schema(connection)
         rows = connection.execute(
             """
-            SELECT id, role, content, quote, sequence, created_at
+            SELECT id, role, content, quote, sequence, created_at, model_trace_json
             FROM chat_messages
             WHERE conversation_id = ?
             ORDER BY sequence ASC
@@ -222,6 +222,7 @@ def add_conversation_message(
     role: Literal["user", "assistant"],
     content: str,
     quote: str | None = None,
+    model_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append one immutable original message to a conversation."""
     clean_content = content.strip()
@@ -245,10 +246,22 @@ def add_conversation_message(
         connection.execute(
             """
             INSERT INTO chat_messages (
-                id, conversation_id, role, content, quote, sequence, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, conversation_id, role, content, quote, sequence, created_at,
+                model_trace_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, conversation_id, role, clean_content, quote or None, sequence, now),
+            (
+                message_id,
+                conversation_id,
+                role,
+                clean_content,
+                quote or None,
+                sequence,
+                now,
+                json.dumps(model_trace, ensure_ascii=False, separators=(",", ":"))
+                if model_trace
+                else None,
+            ),
         )
         title = str(conversation["title"])
         title_generation_eligible = False
@@ -266,6 +279,7 @@ def add_conversation_message(
         "quote": quote or None,
         "sequence": sequence,
         "created_at": now,
+        "model_trace": dict(model_trace) if model_trace else None,
         "title_generation_eligible": title_generation_eligible,
         "provisional_title": title if title_generation_eligible else None,
     }
@@ -607,6 +621,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             quote TEXT,
             sequence INTEGER NOT NULL,
             created_at TEXT NOT NULL,
+            model_trace_json TEXT,
             FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE,
             UNIQUE (conversation_id, sequence)
         );
@@ -634,6 +649,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         ON chat_memories(conversation_id, updated_at DESC);
         """
     )
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(chat_messages)").fetchall()
+    }
+    if "model_trace_json" not in columns:
+        connection.execute("ALTER TABLE chat_messages ADD COLUMN model_trace_json TEXT")
 
 
 def _conversation_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -651,6 +672,15 @@ def _conversation_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _message_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    raw_trace = row["model_trace_json"] if "model_trace_json" in row.keys() else None
+    model_trace = None
+    if raw_trace:
+        try:
+            parsed_trace = json.loads(str(raw_trace))
+            if isinstance(parsed_trace, dict):
+                model_trace = parsed_trace
+        except (TypeError, ValueError, json.JSONDecodeError):
+            model_trace = None
     return {
         "id": str(row["id"]),
         "role": str(row["role"]),
@@ -658,6 +688,7 @@ def _message_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "quote": str(row["quote"]) if row["quote"] else None,
         "sequence": int(row["sequence"]),
         "created_at": str(row["created_at"]),
+        "model_trace": model_trace,
     }
 
 

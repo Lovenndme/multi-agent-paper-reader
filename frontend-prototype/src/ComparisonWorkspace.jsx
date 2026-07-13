@@ -20,6 +20,7 @@ import {
 } from "@tabler/icons-react";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
 import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
+import { ModelCallTrace } from "./ModelCallTrace.jsx";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
 const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
@@ -114,6 +115,7 @@ export function ComparisonWorkspace({
   showToast,
   onResultChange,
   onAddPaper,
+  modelLabel = "论文研究助手",
 }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [focus, setFocus] = useState("comprehensive");
@@ -237,7 +239,7 @@ export function ComparisonWorkspace({
           setLoadedLabels((previous) => [...new Set([...previous, event.label])]);
           setProgress(`${event.label} 已载入，正在对齐证据`);
         }
-        if (event.type === "comparison_token") setProgress("GLM-5.2 正在生成对比矩阵");
+        if (event.type === "comparison_token") setProgress(`${modelLabel} 正在生成对比矩阵`);
         if (event.type === "complete") {
           setData(event);
           setComparisonId(event.comparison_id || "");
@@ -520,7 +522,11 @@ export function ComparisonWorkspace({
         message.id === userId && complete.user_message
           ? complete.user_message
           : message.id === assistantId
-            ? complete.assistant_message || { ...message, content: answer }
+            ? complete.assistant_message || {
+              ...message,
+              content: answer,
+              model_trace: complete.model_trace || null,
+            }
             : message
       )));
       setActiveConversationId(complete.conversation_id || "");
@@ -763,6 +769,7 @@ export function ComparisonWorkspace({
               <ComparisonChatDrawer
                 comparisonTitle={comparison.title}
                 paperCount={comparison.papers.length}
+                modelLabel={modelLabel}
                 conversations={conversations}
                 activeConversationId={activeConversationId}
                 messages={chatMessages}
@@ -884,6 +891,7 @@ function ComparisonGaps({ comparison, assessment }) {
 function ComparisonChatDrawer({
   comparisonTitle,
   paperCount,
+  modelLabel = "论文研究助手",
   conversations,
   activeConversationId,
   messages,
@@ -1003,7 +1011,7 @@ function ComparisonChatDrawer({
       </div>
       <div className="chat-messages" ref={messagesContainerRef} onScroll={handleScroll}>
         {isConversationLoading && <div className="chat-empty"><IconLoader2 className="spin" size={22} /><strong>正在恢复对话</strong></div>}
-        {!isConversationLoading && !messages.length && <div className="chat-empty"><IconArrowsLeftRight size={24} /><strong>GLM-5.2</strong></div>}
+        {!isConversationLoading && !messages.length && <div className="chat-empty"><IconArrowsLeftRight size={24} /><strong>{modelLabel}</strong></div>}
         {messages.map((message) => (
           <article className={`chat-message ${message.role}${message.error ? " error" : ""}`} key={message.id}>
             {message.quote && <blockquote><IconQuote size={14} /> {message.quote}</blockquote>}
@@ -1014,6 +1022,7 @@ function ComparisonChatDrawer({
                 </Suspense>
               ) : <p>{message.content}</p>
             ) : <span className="chat-typing"><i /><i /><i /></span>}
+            {message.role === "assistant" && <ModelCallTrace trace={message.model_trace} />}
           </article>
         ))}
       </div>

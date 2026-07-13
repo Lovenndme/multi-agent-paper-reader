@@ -10,35 +10,47 @@ from functools import lru_cache
 from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-_env_path = Path(__file__).parent.parent / ".env"
+from core.model_providers import (
+    model_display_label,
+    provider_api_key,
+    provider_base_url,
+    provider_spec,
+    selected_text_model,
+    selected_vision_model,
+    text_provider_id,
+    vision_enabled,
+    vision_provider_id,
+)
+
+_env_path = Path(
+    os.environ.get(
+        "PAPER_READER_ENV_PATH",
+        Path(__file__).parent.parent / ".env",
+    )
+)
 load_dotenv(dotenv_path=_env_path, override=False)
 
 # Temperature env var lets users override without code changes.
 # Default 1.0 is required by some providers (e.g. kimi-k2.5).
 _DEFAULT_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "1.0"))
-_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-_DEFAULT_MODEL_NAME = "glm-5.2"
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
-def get_api_key() -> str | None:
-    """Return the GLM key, with legacy OpenAI-compatible config support."""
-    return os.environ.get("GLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+def get_api_key(provider_id: str | None = None) -> str | None:
+    """Return the credential for one provider without exposing other keys."""
+    return provider_api_key(provider_id or text_provider_id())
 
 
-def get_base_url() -> str:
-    """Return the configured OpenAI-compatible API base URL."""
-    return (
-        os.environ.get("GLM_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or _DEFAULT_BASE_URL
-    )
+def get_base_url(provider_id: str | None = None) -> str:
+    """Return the OpenAI-compatible base URL for one provider."""
+    return provider_base_url(provider_id or text_provider_id())
 
 
 def is_llm_configured() -> bool:
@@ -49,70 +61,103 @@ def is_llm_configured() -> bool:
 @lru_cache(maxsize=1)
 def get_llm() -> ChatOpenAI:
     """Return a cached ChatOpenAI instance configured from environment variables."""
-    api_key = get_api_key()
+    provider_id = text_provider_id()
+    api_key = get_api_key(provider_id)
     if not api_key:
-        raise EnvironmentError(
-            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
-        )
+        raise EnvironmentError(_missing_key_message(provider_id))
 
     return ChatOpenAI(
-        model=os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME),
-        api_key=api_key,
-        base_url=get_base_url(),
-        temperature=_DEFAULT_TEMPERATURE,
-        timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
-        max_retries=3,  # built-in openai client retry for transient errors
+        **_client_kwargs(
+            provider_id=provider_id,
+            model=selected_text_model(),
+            api_key=api_key,
+            temperature=_DEFAULT_TEMPERATURE,
+            timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
+            max_retries=3,
+        )
     )
 
 
 @lru_cache(maxsize=1)
 def get_chat_llm() -> ChatOpenAI:
     """Return the same text model with a lower temperature for grounded paper QA."""
-    api_key = get_api_key()
+    provider_id = text_provider_id()
+    api_key = get_api_key(provider_id)
     if not api_key:
-        raise EnvironmentError(
-            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
-        )
+        raise EnvironmentError(_missing_key_message(provider_id))
 
     return ChatOpenAI(
-        model=os.environ.get("MODEL_NAME", _DEFAULT_MODEL_NAME),
-        api_key=api_key,
-        base_url=get_base_url(),
-        temperature=float(os.environ.get("CHAT_TEMPERATURE", "0.25")),
-        timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
-        max_retries=3,
+        **_client_kwargs(
+            provider_id=provider_id,
+            model=selected_text_model(),
+            api_key=api_key,
+            temperature=float(os.environ.get("CHAT_TEMPERATURE", "0.25")),
+            timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
+            max_retries=3,
+        )
     )
 
 
 @lru_cache(maxsize=1)
 def get_vision_llm() -> ChatOpenAI:
     """Return a cached vision-capable ChatOpenAI-compatible client."""
-    api_key = get_api_key()
+    provider_id = vision_provider_id()
+    api_key = get_api_key(provider_id)
     if not api_key:
-        raise EnvironmentError(
-            "GLM_API_KEY is not set. Open .env and paste your Zhipu API key."
-        )
+        raise EnvironmentError(_missing_key_message(provider_id))
 
     return ChatOpenAI(
-        model=os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
-        api_key=api_key,
-        base_url=get_base_url(),
-        temperature=float(os.environ.get("VISION_TEMPERATURE", "0.2")),
-        timeout=float(os.environ.get("VISION_TIMEOUT_SECONDS", "180")),
-        max_retries=2,
+        **_client_kwargs(
+            provider_id=provider_id,
+            model=selected_vision_model(),
+            api_key=api_key,
+            temperature=float(os.environ.get("VISION_TEMPERATURE", "0.2")),
+            timeout=float(os.environ.get("VISION_TIMEOUT_SECONDS", "180")),
+            max_retries=2,
+        )
     )
 
 
 def is_vision_configured() -> bool:
     """Return whether the runtime has enough config to call a vision model."""
-    enabled = os.environ.get("ENABLE_VISION_SUMMARY", "true").lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
+    provider_id = vision_provider_id()
+    return (
+        vision_enabled()
+        and bool(provider_spec(provider_id).vision_models)
+        and bool(get_api_key(provider_id))
+        and bool(selected_vision_model())
+    )
+
+
+def _client_kwargs(
+    *,
+    provider_id: str,
+    model: str,
+    api_key: str,
+    temperature: float,
+    timeout: float,
+    max_retries: int,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key,
+        "base_url": get_base_url(provider_id),
+        "include_response_headers": True,
+        "timeout": timeout,
+        "max_retries": max_retries,
     }
-    return enabled and is_llm_configured() and bool(
-        os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo")
+    # Current GPT-5-family endpoints may reject sampling parameters depending
+    # on the selected reasoning mode. Omitting temperature works for all modes.
+    if not (provider_id == "openai" and model.startswith("gpt-5")):
+        kwargs["temperature"] = temperature
+    return kwargs
+
+
+def _missing_key_message(provider_id: str) -> str:
+    spec = provider_spec(provider_id)
+    return (
+        f"{spec.label} API Key 未配置。请在 Settings 中为当前厂商添加密钥，"
+        f"或在 .env 中设置 {spec.api_key_env}。"
     )
 
 
@@ -121,6 +166,56 @@ def reset_llm_clients() -> None:
     get_llm.cache_clear()
     get_chat_llm.cache_clear()
     get_vision_llm.cache_clear()
+
+
+def start_text_model_call_trace(llm: ChatOpenAI) -> dict[str, Any]:
+    """Snapshot the actual cached client used for one text-model request."""
+    provider_id = text_provider_id()
+    requested_model = str(getattr(llm, "model_name", "") or selected_text_model())
+    base_url = str(getattr(llm, "openai_api_base", "") or get_base_url(provider_id))
+    return {
+        "provider": provider_id,
+        "provider_label": provider_spec(provider_id).label,
+        "requested_model": requested_model,
+        "requested_model_label": model_display_label(provider_id, "text", requested_model),
+        "endpoint_host": urlparse(base_url).netloc,
+        "upstream_model": None,
+        "request_id": None,
+        "verification": "route_recorded",
+    }
+
+
+def update_text_model_call_trace(trace: dict[str, Any], response: Any) -> None:
+    """Merge upstream response metadata into a request trace without secrets."""
+    metadata = dict(getattr(response, "response_metadata", {}) or {})
+    upstream_model = metadata.get("model_name") or metadata.get("model")
+    if upstream_model:
+        trace["upstream_model"] = str(upstream_model)
+
+    headers = metadata.get("headers")
+    if isinstance(headers, dict):
+        normalized_headers = {str(key).lower(): value for key, value in headers.items()}
+        for key in (
+            "x-request-id",
+            "request-id",
+            "openai-request-id",
+            "x-dashscope-request-id",
+            "x-log-id",
+            "x-tt-logid",
+            "x-trace-id",
+        ):
+            if normalized_headers.get(key):
+                trace["request_id"] = str(normalized_headers[key])
+                break
+
+    if trace.get("upstream_model"):
+        requested = str(trace.get("requested_model") or "").strip().lower()
+        reported = str(trace["upstream_model"]).strip().lower()
+        trace["verification"] = (
+            "upstream_confirmed" if requested == reported else "upstream_mismatch"
+        )
+    elif trace.get("request_id"):
+        trace["verification"] = "endpoint_confirmed"
 
 
 def invoke_vision_image_summary(

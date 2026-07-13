@@ -1,12 +1,24 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.chat_memory import ConversationMemoryDigest
 from core.schemas import ExperimentOutput
-from utils.llm import get_chat_llm, parse_structured_output, stream_structured_with_retry
+from utils.llm import (
+    get_api_key,
+    get_base_url,
+    get_chat_llm,
+    get_llm,
+    get_vision_llm,
+    is_vision_configured,
+    parse_structured_output,
+    start_text_model_call_trace,
+    stream_structured_with_retry,
+    update_text_model_call_trace,
+)
 
 
 class FakeStreamingLLM:
@@ -44,7 +56,9 @@ class FakeNeedsRepairLLM:
 
 class TestStructuredOutputParsing(unittest.TestCase):
     def tearDown(self):
+        get_llm.cache_clear()
         get_chat_llm.cache_clear()
+        get_vision_llm.cache_clear()
 
     def test_chat_model_uses_separate_low_temperature(self):
         get_chat_llm.cache_clear()
@@ -55,6 +69,114 @@ class TestStructuredOutputParsing(unittest.TestCase):
             chat_llm = get_chat_llm()
 
         self.assertEqual(chat_llm.temperature, 0.2)
+
+    def test_qwen_route_uses_its_own_key_base_url_and_model(self):
+        get_llm.cache_clear()
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "qwen",
+                "DASHSCOPE_API_KEY": "qwen-test-key",
+                "QWEN_BASE_URL": "https://dashscope.example/v1",
+                "MODEL_NAME": "qwen3.7-plus",
+            },
+            clear=True,
+        ):
+            llm = get_llm()
+            api_key = get_api_key()
+            base_url = get_base_url()
+
+        self.assertEqual(api_key, "qwen-test-key")
+        self.assertEqual(base_url, "https://dashscope.example/v1")
+        self.assertEqual(llm.model_name, "qwen3.7-plus")
+
+    def test_model_call_trace_combines_client_route_and_upstream_metadata(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "qwen",
+                "MODEL_NAME": "qwen3.7-max",
+                "DASHSCOPE_API_KEY": "qwen-test-key",
+            },
+            clear=True,
+        ):
+            trace = start_text_model_call_trace(
+                SimpleNamespace(
+                    model_name="qwen3.7-max",
+                    openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                )
+            )
+            update_text_model_call_trace(
+                trace,
+                SimpleNamespace(
+                    response_metadata={
+                        "model_name": "qwen3.7-max",
+                        "headers": {"x-request-id": "qwen-request-123"},
+                    }
+                ),
+            )
+
+        self.assertEqual(trace["provider"], "qwen")
+        self.assertEqual(trace["endpoint_host"], "dashscope.aliyuncs.com")
+        self.assertEqual(trace["upstream_model"], "qwen3.7-max")
+        self.assertEqual(trace["request_id"], "qwen-request-123")
+        self.assertEqual(trace["verification"], "upstream_confirmed")
+
+    def test_doubao_route_uses_ark_key_base_url_and_model(self):
+        get_llm.cache_clear()
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "doubao",
+                "ARK_API_KEY": "doubao-test-key",
+                "DOUBAO_BASE_URL": "https://ark.example/api/v3",
+                "MODEL_NAME": "doubao-seed-2-0-lite-260215",
+            },
+            clear=True,
+        ):
+            llm = get_llm()
+            api_key = get_api_key()
+            base_url = get_base_url()
+
+        self.assertEqual(api_key, "doubao-test-key")
+        self.assertEqual(base_url, "https://ark.example/api/v3")
+        self.assertEqual(llm.model_name, "doubao-seed-2-0-lite-260215")
+
+    def test_vision_route_ignores_a_different_legacy_provider(self):
+        get_vision_llm.cache_clear()
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "zhipu",
+                "GLM_API_KEY": "zhipu-test-key",
+                "GLM_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+                "MODEL_NAME": "glm-5.2",
+                "VISION_PROVIDER": "qwen",
+                "DASHSCOPE_API_KEY": "qwen-test-key",
+                "VISION_MODEL_NAME": "qwen3-vl-plus",
+                "ENABLE_VISION_SUMMARY": "true",
+            },
+            clear=True,
+        ):
+            vision_llm = get_vision_llm()
+            configured = is_vision_configured()
+
+        self.assertTrue(configured)
+        self.assertEqual(vision_llm.model_name, "glm-5v-turbo")
+
+    def test_deepseek_route_does_not_claim_hosted_vision_support(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "deepseek",
+                "DEEPSEEK_API_KEY": "deepseek-test-key",
+                "VISION_PROVIDER": "deepseek",
+                "VISION_MODEL_NAME": "deepseek-vl2",
+                "ENABLE_VISION_SUMMARY": "true",
+            },
+            clear=True,
+        ):
+            self.assertFalse(is_vision_configured())
 
     def test_accepts_fenced_json_from_compatible_provider(self):
         response = AIMessage(

@@ -65,6 +65,12 @@ class TestChatMemory(unittest.TestCase):
             first["id"],
             role="assistant",
             content="方法解释。",
+            model_trace={
+                "provider": "zhipu",
+                "requested_model": "glm-5.2",
+                "upstream_model": "glm-5.2",
+                "verification": "upstream_confirmed",
+            },
         )
 
         restored = load_conversation(first["id"])
@@ -72,6 +78,7 @@ class TestChatMemory(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in restored["messages"]], [user["id"], assistant["id"]])
         self.assertEqual(restored["messages"][0]["quote"], "方法片段")
+        self.assertEqual(restored["messages"][1]["model_trace"]["upstream_model"], "glm-5.2")
         self.assertEqual({item["id"] for item in conversations}, {first["id"], second["id"]})
         self.assertEqual(restored["conversation"]["message_count"], 2)
 

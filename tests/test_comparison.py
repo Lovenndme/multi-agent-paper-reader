@@ -140,7 +140,12 @@ class TestMultiPaperComparison(unittest.TestCase):
             question="两篇论文的方法有什么差异？",
         )
 
-        prompt = build_comparison_chat_prompt(request)
+        with patch.dict(
+            os.environ,
+            {"TEXT_PROVIDER": "qwen", "MODEL_NAME": "qwen3.7-max"},
+            clear=False,
+        ):
+            prompt = build_comparison_chat_prompt(request)
         prompt_text = "\n".join(str(message.content) for message in prompt.messages)
         events = [json.loads(line) for line in _stream_comparison_chat_response(request, demo=True)]
         conversation_id = events[-1]["conversation_id"]
@@ -148,6 +153,8 @@ class TestMultiPaperComparison(unittest.TestCase):
 
         self.assertIn("P1:E001", prompt_text)
         self.assertIn("P2:E001", prompt_text)
+        self.assertNotIn("Alibaba Qwen / Qwen3.7 Max", prompt_text)
+        self.assertIn("以本条回答下方的服务端调用详情为准", prompt_text)
         self.assertIn("不要把长公式或推导塞进表格", prompt_text)
         self.assertEqual([message["role"] for message in restored["messages"]], ["user", "assistant"])
         self.assertEqual(len(list_comparison_conversations(comparison_id)), 1)

@@ -18,8 +18,8 @@ The repository includes a full-stack web app:
 - Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper
 - Comparison API: `POST /api/comparisons/stream` compares 2-4 saved papers with prefixed evidence, while `/api/comparisons/*` persists comparison workspaces and cross-paper conversations
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
-- Settings API: `GET /api/settings` reports the project version and active models without exposing credentials; `POST /api/settings/api-key` validates a GLM key before saving it locally
-- Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded GLM batch before Live analysis starts
+- Settings API: `GET /api/settings` returns the provider catalog and active routes without exposing credentials; provider-specific key and routing endpoints validate and activate local configuration
+- Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded request through the active text model before Live analysis starts
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
 Run it locally:
@@ -45,16 +45,18 @@ Open:
 http://127.0.0.1:8000/
 ```
 
-For first-time setup, open **Settings** in the top-right navigation, paste a Zhipu GLM API key, and choose **Verify and save**. The backend verifies the key with a minimal live request before writing it to the local `.env` file; the key is never returned to the browser. You can also copy `.env.example` to `.env` and set `GLM_API_KEY` manually. The default provider is Zhipu GLM at `https://open.bigmodel.cn/api/paas/v4`, using `glm-5.2`. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`). `CHAT_INPUT_TOKEN_BUDGET` sets the conservative dynamic input budget used to balance evidence, recent turns, and long-term memory (default `48000`).
+For first-time setup, open **Settings** in the top-right navigation. Text analysis supports Zhipu GLM, DeepSeek, OpenAI, Alibaba Qwen, and ByteDance Doubao, with multiple curated models for every provider. OpenAI choices are intentionally limited to the GPT-5.6 Sol, Terra, and Luna series. Doubao uses the Volcengine Ark OpenAI-compatible endpoint and offers Seed 2.0 Pro, Lite, and Mini routes. Vision is automatically paired with the selected text provider and cannot be routed to a different vendor, so one verified API key covers the active text and vision route. DeepSeek publishes open-source vision-language models, but its hosted cloud API currently lists only text models; selecting DeepSeek therefore disables rendered-image understanding while preserving PDF text, table, caption, agent-analysis, and follow-up-chat workflows. Users who need hosted figure understanding must switch the entire active route to Zhipu, OpenAI, Qwen, or Doubao. Self-hosted DeepSeek-VL endpoints are not integrated yet. Each provider has its own API key and editable Base URL. A route cannot be activated until that provider's key has been validated and saved locally; no saved key is ever returned to the browser.
 
-For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and `VISION_MODEL_NAME=glm-5v-turbo` or another OpenAI-compatible vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
+The default route remains Zhipu `glm-5.2` for text and its automatic `glm-5v-turbo` vision pairing. You can also copy `.env.example` to `.env` and configure `TEXT_PROVIDER`, `MODEL_NAME`, and provider-specific keys manually. `VISION_PROVIDER` is retained for backward compatibility but is normalized to `TEXT_PROVIDER`; the vision model is always the catalog's recommended model for that provider. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`). `CHAT_INPUT_TOKEN_BUDGET` sets the conservative dynamic input budget used to balance evidence, recent turns, and long-term memory (default `48000`).
+
+For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and select a text provider that offers a hosted vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the paired vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
 
 ## CLI Quick Start
 
 ```bash
 pip install -r requirements.txt
 copy .env.example .env
-# Edit .env and set GLM_API_KEY
+# Edit .env and set the API key for the selected provider
 
 python main.py examples/your_paper.pdf --pretty
 ```

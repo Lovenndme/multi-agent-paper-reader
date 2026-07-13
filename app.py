@@ -83,6 +83,15 @@ from core.history import (
     save_paper_analysis,
 )
 from core.pdf_parser import ParsedPaper, parse_pdf
+from core.model_providers import (
+    provider_spec,
+    selected_text_model,
+    selected_text_model_label,
+    selected_vision_model,
+    text_provider_id,
+    vision_enabled,
+    vision_provider_id,
+)
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 from core.section_titles import (
     clean_section_title,
@@ -93,8 +102,13 @@ from core.settings import (
     PROJECT_VERSION,
     ApiKeySettingsRequest,
     ApiKeyValidationError,
+    ModelRoutingSettingsRequest,
+    ModelRoutingValidationError,
+    ProviderApiKeySettingsRequest,
     application_settings_payload,
     configure_glm_api_key,
+    configure_model_routing,
+    configure_provider_api_key,
 )
 from core.vision import enrich_paper_figures_with_vision
 from utils.llm import is_llm_configured, is_vision_configured
@@ -103,7 +117,10 @@ from utils.llm import is_llm_configured, is_vision_configured
 ROOT = Path(__file__).parent
 FRONTEND_DIST = ROOT / "frontend-prototype" / "dist"
 
-load_dotenv(ROOT / ".env", override=False)
+load_dotenv(
+    Path(os.environ.get("PAPER_READER_ENV_PATH", ROOT / ".env")),
+    override=False,
+)
 
 app = FastAPI(
     title="Multi-Agent Paper Reader",
@@ -179,7 +196,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
             f"识别 {title} 所解决的核心研究问题及其主要技术路线。"
         ),
         proposed_method=(
-            "Demo 模式已成功解析 PDF。配置 GLM_API_KEY 后，可让真实 MethodAgent "
+            "Demo 模式已成功解析 PDF。配置当前文本模型的 API Key 后，可让真实 MethodAgent "
             "分析论文中与方法相关的章节。"
         ),
         key_components=[
@@ -197,7 +214,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
             "该 Demo 结果用于证明前后端链路已经连通；在未运行真实 LLM 时，"
             "不会对论文的具体创新性作出判断。"
         ),
-        implementation_details="在 .env 中配置 GLM_API_KEY，即可运行真实结构化分析。",
+        implementation_details="在 Settings 中配置模型厂商与 API Key，即可运行真实结构化分析。",
         evidence=demo_evidence,
     )
     experiment = ExperimentOutput(
@@ -227,7 +244,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
         ],
         limitations=[
             "Demo 模式没有执行真实 LLM 评审。",
-            "针对论文的具体批判性分析需要 GLM_API_KEY 和兼容模型。",
+            "针对论文的具体批判性分析需要当前厂商的 API Key 和兼容模型。",
         ],
         potential_improvements=[
             "配置真实模型后重新运行分析。",
@@ -249,7 +266,7 @@ def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
         method_highlights=method.proposed_method,
         experiment_highlights=experiment.main_results,
         limitations_and_future_work=(
-            "当前是确定性的 Demo 响应。在 .env 中配置 GLM_API_KEY 后，"
+            "当前是确定性的 Demo 响应。在 Settings 中配置模型厂商与 API Key 后，"
             "即可运行真实多 Agent 分析。"
         ),
         reading_notes=(
@@ -315,6 +332,27 @@ def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str,
 
 def _stream_event(event_type: str, **payload: Any) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+
+
+def _model_runtime_payload() -> dict[str, Any]:
+    """Describe the active route so saved analyses remain reproducible."""
+    text_provider = text_provider_id()
+    visual_provider = vision_provider_id()
+    return {
+        "text_provider": text_provider,
+        "text_provider_label": provider_spec(text_provider).label,
+        "text_model": selected_text_model(),
+        "text_model_label": selected_text_model_label(),
+        "vision_enabled": vision_enabled(),
+        "vision_provider": visual_provider,
+        "vision_provider_label": provider_spec(visual_provider).label,
+        "vision_model": selected_vision_model(),
+    }
+
+
+def _missing_model_key_message() -> str:
+    spec = provider_spec(text_provider_id())
+    return f"{spec.label} API Key 未配置，请在 Settings 中添加当前文本模型所需的密钥。"
 
 
 def _stream_demo_tokens(agent_id: str, output: dict[str, Any]) -> Iterable[str]:
@@ -420,6 +458,7 @@ def _stream_demo_analysis(
     result_payload = {
         "mode": "demo",
         "analysis_id": None,
+        "model_config": _model_runtime_payload(),
         "paper": paper_payload,
         "evidence_index": index_payload,
         **outputs,
@@ -601,6 +640,7 @@ def _stream_live_analysis(
         snippets,
         {
             "mode": "live",
+            "model_config": _model_runtime_payload(),
             "paper": paper_payload,
             "evidence_index": index_payload,
             **outputs,
@@ -616,6 +656,7 @@ def _stream_live_analysis(
     result_payload = {
         "mode": "live",
         "analysis_id": analysis_id,
+        "model_config": _model_runtime_payload(),
         "paper": paper_payload,
         "evidence_index": index_payload,
         **outputs,
@@ -662,6 +703,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
         user_message: dict[str, Any] | None = None
         assistant_message: dict[str, Any] | None = None
         answer_chunks: list[str] = []
+        model_trace: dict[str, Any] | None = None if demo else {}
 
         if not demo and (request.conversation_id or request.history_id):
             if request.conversation_id:
@@ -693,6 +735,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
             for token in stream_chat_reply(
                 effective_request,
                 messages=prompt.messages if prompt else None,
+                trace=model_trace,
             ):
                 answer_chunks.append(token)
                 yield _stream_event("token", text=token)
@@ -702,6 +745,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 conversation_id,
                 role="assistant",
                 content="".join(answer_chunks),
+                model_trace=model_trace,
             )
             memory_refresh_scheduled = schedule_memory_refresh(conversation_id)
             title_generation_scheduled = bool(
@@ -720,7 +764,9 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
             conversation = None
         yield _stream_event(
             "complete",
-            model=os.environ.get("MODEL_NAME", "glm-5.2"),
+            provider=(model_trace or {}).get("provider") or text_provider_id(),
+            model=(model_trace or {}).get("requested_model") or selected_text_model(),
+            model_trace=model_trace,
             conversation_id=conversation_id,
             conversation=conversation,
             user_message=user_message,
@@ -822,6 +868,7 @@ def _stream_comparison_chat_response(
             conversation_id = conversation["id"]
         effective_request = request.model_copy(update={"conversation_id": conversation_id})
         prompt = None if demo else build_comparison_chat_prompt(effective_request)
+        model_trace: dict[str, Any] | None = None if demo else {}
         user_message = add_comparison_message(
             conversation_id,
             role="user",
@@ -840,6 +887,7 @@ def _stream_comparison_chat_response(
             for token in stream_comparison_chat_reply(
                 effective_request,
                 messages=prompt.messages if prompt else None,
+                trace=model_trace,
             ):
                 answer_chunks.append(token)
                 yield _stream_event("token", text=token)
@@ -847,6 +895,7 @@ def _stream_comparison_chat_response(
             conversation_id,
             role="assistant",
             content="".join(answer_chunks),
+            model_trace=model_trace,
         )
         title_generation_scheduled = bool(
             not demo
@@ -859,7 +908,9 @@ def _stream_comparison_chat_response(
         )
         yield _stream_event(
             "complete",
-            model=os.environ.get("MODEL_NAME", "glm-5.2"),
+            provider=(model_trace or {}).get("provider") or text_provider_id(),
+            model=(model_trace or {}).get("requested_model") or selected_text_model(),
+            model_trace=model_trace,
             conversation_id=conversation_id,
             conversation=get_comparison_conversation_summary(conversation_id),
             user_message=user_message,
@@ -883,9 +934,12 @@ def health() -> dict[str, Any]:
         "version": PROJECT_VERSION,
         "frontend_dist": FRONTEND_DIST.exists(),
         "llm_configured": is_llm_configured(),
-        "model": os.environ.get("MODEL_NAME", "glm-5.2"),
+        "provider": text_provider_id(),
+        "model": selected_text_model(),
+        "model_label": selected_text_model_label(),
         "vision_configured": is_vision_configured(),
-        "vision_model": os.environ.get("VISION_MODEL_NAME", "glm-5v-turbo"),
+        "vision_provider": vision_provider_id(),
+        "vision_model": selected_vision_model(),
     }
 
 
@@ -905,6 +959,33 @@ def update_application_api_key(request: ApiKeySettingsRequest) -> dict[str, Any]
     return {"ok": True, "settings": settings}
 
 
+@app.post("/api/settings/providers/{provider_id}/api-key")
+def update_provider_api_key(
+    provider_id: str,
+    request: ProviderApiKeySettingsRequest,
+) -> dict[str, Any]:
+    """Validate and persist one provider key without returning secret material."""
+    try:
+        settings = configure_provider_api_key(
+            provider_id,
+            request.api_key.get_secret_value(),
+            base_url=request.base_url,
+        )
+    except ApiKeyValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "settings": settings}
+
+
+@app.put("/api/settings/routing")
+def update_model_routing(request: ModelRoutingSettingsRequest) -> dict[str, Any]:
+    """Persist active text and vision routes and activate them immediately."""
+    try:
+        settings = configure_model_routing(request)
+    except ModelRoutingValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "settings": settings}
+
+
 @app.get("/api/comparisons")
 def comparison_history(
     limit: int = Query(default=100, ge=1, le=500),
@@ -920,7 +1001,7 @@ def compare_saved_papers(
 ) -> StreamingResponse:
     """Compare two to four saved papers and stream the structured result."""
     if not demo and not is_llm_configured():
-        raise HTTPException(status_code=503, detail="GLM_API_KEY is not set.")
+        raise HTTPException(status_code=503, detail=_missing_model_key_message())
     return StreamingResponse(
         _stream_comparison_response(request, demo=demo),
         media_type="application/x-ndjson",
@@ -935,7 +1016,7 @@ def chat_with_comparison(
 ) -> StreamingResponse:
     """Continue a persisted, evidence-grounded cross-paper conversation."""
     if not demo and not is_llm_configured():
-        raise HTTPException(status_code=503, detail="GLM_API_KEY is not set.")
+        raise HTTPException(status_code=503, detail=_missing_model_key_message())
     if not comparison_exists(request.comparison_id):
         raise HTTPException(status_code=404, detail="Comparison workspace was not found.")
     return StreamingResponse(
@@ -1131,10 +1212,7 @@ async def analyze_paper(
             if not is_llm_configured():
                 raise HTTPException(
                     status_code=503,
-                    detail=(
-                        "GLM_API_KEY is not set. Add it to .env or call "
-                        "/api/analyze?demo=true to verify the upload path."
-                    ),
+                    detail=_missing_model_key_message(),
                 )
             try:
                 translated_titles = translate_section_titles(
@@ -1160,6 +1238,7 @@ async def analyze_paper(
             snippets,
             {
                 "mode": mode,
+                "model_config": _model_runtime_payload(),
                 "paper": paper_payload,
                 **outputs,
             },
@@ -1168,6 +1247,7 @@ async def analyze_paper(
     result_payload = {
         "mode": mode,
         "analysis_id": analysis_id,
+        "model_config": _model_runtime_payload(),
         "paper": paper_payload,
         **outputs,
     }
@@ -1199,10 +1279,7 @@ async def analyze_paper_stream(
     if not demo and not is_llm_configured():
         raise HTTPException(
             status_code=503,
-            detail=(
-                "GLM_API_KEY is not set. Add it to .env or call "
-                "/api/analyze/stream?demo=true to verify the upload path."
-            ),
+            detail=_missing_model_key_message(),
         )
 
     return StreamingResponse(
@@ -1224,7 +1301,7 @@ def chat_with_paper(
     if not demo and not is_llm_configured():
         raise HTTPException(
             status_code=503,
-            detail="GLM_API_KEY is not set. Enable Demo mode or configure the model key.",
+            detail=_missing_model_key_message(),
         )
     return StreamingResponse(
         _stream_chat_response(request, demo=demo),

@@ -65,9 +65,24 @@ class TestChatStreamMemory(unittest.TestCase):
             context={"paper": {"title": "Streaming Memory"}},
         )
 
+        def fake_stream(*_args, trace=None, **_kwargs):
+            trace.update(
+                {
+                    "provider": "qwen",
+                    "provider_label": "Alibaba Qwen",
+                    "requested_model": "qwen3.7-max",
+                    "requested_model_label": "Qwen3.7 Max",
+                    "endpoint_host": "dashscope.aliyuncs.com",
+                    "upstream_model": "qwen3.7-max",
+                    "request_id": "request-test-123",
+                    "verification": "upstream_confirmed",
+                }
+            )
+            return iter(["因为", "证据充分。"])
+
         with (
             patch("app.build_chat_prompt", return_value=fake_prompt),
-            patch("app.stream_chat_reply", return_value=iter(["因为", "证据充分。"])),
+            patch("app.stream_chat_reply", side_effect=fake_stream),
             patch("app.schedule_conversation_title", return_value=True),
         ):
             events = [json.loads(line) for line in _stream_chat_response(request, demo=False)]
@@ -81,6 +96,8 @@ class TestChatStreamMemory(unittest.TestCase):
         self.assertEqual([item["role"] for item in restored["messages"]], ["user", "assistant"])
         self.assertEqual(restored["messages"][0]["quote"], "方法片段")
         self.assertEqual(restored["messages"][1]["content"], "因为证据充分。")
+        self.assertEqual(complete["model_trace"]["verification"], "upstream_confirmed")
+        self.assertEqual(restored["messages"][1]["model_trace"]["request_id"], "request-test-123")
         self.assertEqual(complete["conversation"]["message_count"], 2)
         self.assertTrue(complete["title_generation_scheduled"])
 

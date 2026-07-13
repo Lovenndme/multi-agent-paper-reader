@@ -23,7 +23,13 @@ from core.external_knowledge import (
     format_external_sources,
     search_external_academic_sources,
 )
-from utils.llm import get_chat_llm, invoke_with_retry
+from core.model_providers import active_text_model_identity
+from utils.llm import (
+    get_chat_llm,
+    invoke_with_retry,
+    start_text_model_call_trace,
+    update_text_model_call_trace,
+)
 
 
 MAX_CONTEXT_CHARS = 48_000
@@ -296,7 +302,9 @@ def build_chat_prompt(request: PaperChatRequest) -> ChatPrompt:
     )
 
     instructions = (
-        "你是本次论文研读任务的后续研究助手，使用与论文分析相同的 GLM 模型。"
+        "你是本次论文研读任务的后续研究助手。"
+        "不要根据系统提示词或历史对话猜测、自报具体模型厂商与型号；"
+        "用户询问模型身份时，明确说明应以本条回答下方的服务端调用详情为准。"
         "你的工作方式应接近严谨的论文研究助理：先定位原文证据，再组织答案。\n\n"
         "<source_policy>\n"
         "1. 检索到的论文原文、表格和图像证据是判断论文事实的最高依据。\n"
@@ -586,12 +594,18 @@ def stream_chat_reply(
     request: PaperChatRequest,
     *,
     messages: list[BaseMessage] | tuple[BaseMessage, ...] | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> Iterator[str]:
     """Stream an answer, falling back to one non-streaming call if needed."""
     model_messages = list(messages) if messages is not None else build_chat_messages(request)
+    llm = get_chat_llm()
+    runtime_trace = trace if trace is not None else {}
+    runtime_trace.clear()
+    runtime_trace.update(start_text_model_call_trace(llm))
     emitted = False
     try:
-        for chunk in get_chat_llm().stream(model_messages):
+        for chunk in llm.stream(model_messages):
+            update_text_model_call_trace(runtime_trace, chunk)
             text = _content_to_text(getattr(chunk, "content", chunk))
             if not text:
                 continue
@@ -602,7 +616,8 @@ def stream_chat_reply(
         if emitted:
             raise
 
-    response = invoke_with_retry(get_chat_llm(), model_messages, retries=2, delay=1.5)
+    response = invoke_with_retry(llm, model_messages, retries=2, delay=1.5)
+    update_text_model_call_trace(runtime_trace, response)
     text = _content_to_text(getattr(response, "content", response)).strip()
     if not text:
         raise RuntimeError("模型没有返回可显示的追问回答。")
@@ -611,16 +626,17 @@ def stream_chat_reply(
 
 def demo_chat_reply(request: PaperChatRequest) -> str:
     """Return a deterministic response for sample and Demo-mode UI verification."""
+    model_identity = active_text_model_identity()
     if request.selected_text:
         excerpt = " ".join(request.selected_text.split())[:120]
         return (
             f"你选中的片段是“{excerpt}”。当前为示例模式，侧边追问的选区、上下文和"
-            "连续对话链路已经连通；使用真实论文完成 Live 分析后，这里会由 GLM-5.2 "
+            f"连续对话链路已经连通；使用真实论文完成 Live 分析后，这里会由 {model_identity} "
             "结合 Agent 输出与证据索引回答。"
         )
     return (
         "当前为示例模式，追问界面和会话链路已经连通。完成一次 Live 论文分析后，"
-        "GLM-5.2 会基于本次 Agent 输出、证据索引和最近对话继续回答。"
+        f"{model_identity} 会基于本次 Agent 输出、证据索引和最近对话继续回答。"
     )
 
 
