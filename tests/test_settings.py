@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,7 +98,10 @@ class TestApplicationSettings(unittest.TestCase):
 
                 self.assertTrue(payload["api_key_configured"])
                 self.assertIn("GLM_API_KEY='test-key-that-is-long-enough'", env_path.read_text())
-                self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+                # Windows exposes synthetic POSIX mode bits and chmod only toggles
+                # the read-only attribute, so 0600 is meaningful only on POSIX.
+                if os.name == "posix":
+                    self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
                 reset_clients.assert_called_once_with()
         finally:
             if previous_key is None:
