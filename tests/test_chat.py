@@ -87,7 +87,7 @@ class TestPaperChat(unittest.TestCase):
             )
 
         self.assertIn("一段需要解释的论文结论", reply)
-        self.assertIn("Alibaba Qwen / Qwen3.7 Max", reply)
+        self.assertIn("Qwen / Qwen3.7 Max", reply)
 
     def test_prompt_treats_server_call_details_as_model_identity_source(self):
         request = PaperChatRequest(

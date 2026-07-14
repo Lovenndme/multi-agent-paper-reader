@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from dotenv import set_key
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
@@ -18,11 +19,16 @@ from pydantic import BaseModel, SecretStr
 from core.model_health import invalidate_model_catalog_health_cache
 from core.model_providers import (
     PROVIDERS,
+    model_mode_request_body,
+    model_modes,
     provider_api_key,
     provider_base_url,
+    provider_label,
+    provider_protocol,
     provider_spec,
     selected_text_model,
     selected_text_model_label,
+    selected_text_mode,
     selected_vision_model,
     text_provider_id,
     vision_enabled,
@@ -33,7 +39,7 @@ from utils.llm import is_llm_configured, is_vision_configured, reset_llm_clients
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", PROJECT_ROOT / ".env"))
-PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.2.1")
+PROJECT_VERSION = os.environ.get("PAPER_READER_VERSION", "V1.2.2")
 _SETTINGS_LOCK = threading.Lock()
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
@@ -49,6 +55,10 @@ class ProviderApiKeySettingsRequest(BaseModel):
 
     api_key: SecretStr
     base_url: str | None = None
+    protocol: str | None = None
+    provider_name: str | None = None
+    text_model: str | None = None
+    vision_model: str | None = None
 
 
 class ModelRoutingSettingsRequest(BaseModel):
@@ -56,6 +66,7 @@ class ModelRoutingSettingsRequest(BaseModel):
 
     text_provider: str
     text_model: str
+    text_mode: str | None = None
     vision_enabled: bool = True
     vision_provider: str | None = None
     vision_model: str | None = None
@@ -73,44 +84,69 @@ def application_settings_payload() -> dict[str, Any]:
     """Return public configuration metadata without any secret material."""
     active_text_provider = text_provider_id()
     active_vision_provider = vision_provider_id()
-    text_spec = provider_spec(active_text_provider)
-    vision_spec = provider_spec(active_vision_provider)
     text_configured = is_llm_configured()
     vision_configured = is_vision_configured()
 
     providers = []
     for spec in PROVIDERS.values():
+        custom_text_model = os.environ.get("CUSTOM_TEXT_MODEL", "").strip()
+        custom_vision_model = os.environ.get("CUSTOM_VISION_MODEL", "").strip()
+        text_models = list(spec.text_models)
+        vision_models = list(spec.vision_models)
+        if spec.customizable:
+            text_models = [
+                type(spec.text_models[0])(
+                    custom_text_model or "custom-model",
+                    custom_text_model or "请先配置模型 ID",
+                    "由中转站提供的文本模型",
+                    True,
+                )
+            ]
+            vision_models = (
+                [type(spec.text_models[0])(
+                    custom_vision_model,
+                    custom_vision_model,
+                    "由中转站提供的视觉模型",
+                    True,
+                )]
+                if custom_vision_model
+                else []
+            )
         providers.append(
             {
                 "id": spec.id,
-                "label": spec.label,
+                "label": provider_label(spec.id),
                 "configured": bool(provider_api_key(spec.id)),
                 "base_url": provider_base_url(spec.id),
                 "key_url": spec.key_url,
-                "supports_vision": bool(spec.vision_models),
-                "default_text_model": spec.default_text_model,
-                "default_vision_model": spec.default_vision_model,
-                "text_models": [model.payload() for model in spec.text_models],
-                "vision_models": [model.payload() for model in spec.vision_models],
+                "protocol": provider_protocol(spec.id),
+                "customizable": spec.customizable,
+                "provider_name": provider_label(spec.id),
+                "supports_vision": bool(vision_models),
+                "default_text_model": text_models[0].id,
+                "default_vision_model": vision_models[0].id if vision_models else None,
+                "text_models": [model.payload() for model in text_models],
+                "vision_models": [model.payload() for model in vision_models],
             }
         )
 
     return {
         "version": PROJECT_VERSION,
-        "provider": text_spec.label,
+        "provider": provider_label(active_text_provider),
         "api_key_configured": text_configured,
         "routing": {
             "text": {
                 "provider": active_text_provider,
-                "provider_label": text_spec.label,
+                "provider_label": provider_label(active_text_provider),
                 "model": selected_text_model(),
                 "model_label": selected_text_model_label(),
+                "mode": selected_text_mode(),
                 "configured": text_configured,
             },
             "vision": {
                 "enabled": vision_enabled(),
                 "provider": active_vision_provider,
-                "provider_label": vision_spec.label,
+                "provider_label": provider_label(active_vision_provider),
                 "model": selected_vision_model(),
                 "configured": vision_configured,
                 "credential_configured": bool(provider_api_key(active_vision_provider)),
@@ -123,7 +159,7 @@ def application_settings_payload() -> dict[str, Any]:
                 "id": "text",
                 "label": "文本分析",
                 "name": selected_text_model(),
-                "provider": text_spec.label,
+                "provider": provider_label(active_text_provider),
                 "purpose": "论文分析与追问",
                 "configured": text_configured,
             },
@@ -131,7 +167,7 @@ def application_settings_payload() -> dict[str, Any]:
                 "id": "vision",
                 "label": "图表理解",
                 "name": selected_vision_model(),
-                "provider": vision_spec.label,
+                "provider": provider_label(active_vision_provider),
                 "purpose": "图像、图表与公式区域",
                 "configured": vision_configured,
             },
@@ -144,6 +180,10 @@ def configure_provider_api_key(
     api_key: str,
     *,
     base_url: str | None = None,
+    protocol: str | None = None,
+    provider_name: str | None = None,
+    text_model: str | None = None,
+    vision_model: str | None = None,
     env_path: Path = ENV_PATH,
 ) -> dict[str, Any]:
     """Validate, persist, and activate one provider credential."""
@@ -156,11 +196,35 @@ def configure_provider_api_key(
     if not 10 <= len(clean_key) <= 4096:
         raise ApiKeyValidationError("API Key 格式不完整，请重新检查。")
     clean_base_url = _validated_base_url(base_url or provider_base_url(spec.id))
+    custom_values: dict[str, str] = {}
+    probe_protocol = spec.protocol
     probe_model = (
         selected_text_model()
         if text_provider_id() == spec.id
         else spec.default_text_model
     )
+    if spec.customizable:
+        clean_protocol = (protocol or "").strip().lower()
+        if clean_protocol not in {"openai", "anthropic"}:
+            raise ApiKeyValidationError("请选择 OpenAI-compatible 或 Anthropic-compatible 协议。")
+        try:
+            clean_text_model = _validated_model_id(text_model or "", "文本模型")
+            clean_vision_model = (vision_model or "").strip()
+            if clean_vision_model:
+                clean_vision_model = _validated_model_id(clean_vision_model, "视觉模型")
+        except ModelRoutingValidationError as exc:
+            raise ApiKeyValidationError(str(exc)) from exc
+        clean_name = (provider_name or "").strip() or "自定义中转站"
+        if len(clean_name) > 48 or any(char in clean_name for char in "\r\n\t"):
+            raise ApiKeyValidationError("中转站名称必须为不超过 48 个字符的单行文本。")
+        probe_protocol = clean_protocol
+        probe_model = clean_text_model
+        custom_values = {
+            "CUSTOM_API_PROTOCOL": clean_protocol,
+            "CUSTOM_PROVIDER_NAME": clean_name,
+            "CUSTOM_TEXT_MODEL": clean_text_model,
+            "CUSTOM_VISION_MODEL": clean_vision_model,
+        }
 
     try:
         discovered_models = _probe_provider_api_key(
@@ -168,31 +232,30 @@ def configure_provider_api_key(
             clean_key,
             clean_base_url,
             probe_model,
+            protocol=probe_protocol,
         )
     except ApiKeyValidationError:
         raise
     except Exception as exc:
         raise ApiKeyValidationError(
-            f"{spec.label} API Key 验证失败，请检查密钥、Base URL 与网络连接。"
+            f"{provider_label(spec.id)} API Key 验证失败，请检查密钥、Base URL 与网络连接。"
         ) from exc
 
     with _SETTINGS_LOCK:
-        _persist_env_values(
-            {
+        values = {
                 spec.api_key_env: clean_key,
                 spec.base_url_env: clean_base_url,
-            },
-            env_path,
-        )
-        os.environ[spec.api_key_env] = clean_key
-        os.environ[spec.base_url_env] = clean_base_url
+                **custom_values,
+            }
+        _persist_env_values(values, env_path)
+        os.environ.update(values)
         reset_llm_clients()
         invalidate_model_catalog_health_cache()
 
     payload = application_settings_payload()
     payload["validation"] = {
         "provider": spec.id,
-        "provider_label": spec.label,
+        "provider_label": provider_label(spec.id),
         "available_model_count": len(discovered_models),
         "available_models": discovered_models[:100],
     }
@@ -229,27 +292,45 @@ def configure_model_routing(
     except ValueError as exc:
         raise ModelRoutingValidationError(str(exc)) from exc
     text_model = _validated_model_id(request.text_model, "文本模型")
-    if not any(model.id == text_model for model in text_spec.text_models):
+    if not text_spec.customizable and not any(model.id == text_model for model in text_spec.text_models):
         raise ModelRoutingValidationError(
-            f"{text_spec.label} 不支持文本模型 {text_model}，请从模型列表中选择。"
+            f"{provider_label(text_provider)} 不支持文本模型 {text_model}，请从模型列表中选择。"
         )
     if not provider_api_key(text_provider):
         raise ModelRoutingValidationError(
-            f"请先为 {text_spec.label} 配置并验证 API Key，再应用模型配置。"
+            f"请先为 {provider_label(text_provider)} 配置并验证 API Key，再应用模型配置。"
         )
+
+    available_modes = model_modes(text_provider, text_model)
+    requested_mode = (request.text_mode or "").strip().lower()
+    if available_modes:
+        if requested_mode and not any(mode.id == requested_mode for mode in available_modes):
+            raise ModelRoutingValidationError(
+                f"{text_model} 不支持响应模式 {requested_mode}，请从模式列表中选择。"
+            )
+        text_mode = requested_mode or available_modes[0].id
+    else:
+        text_mode = ""
 
     requested_vision_provider = (request.vision_provider or text_provider).strip().lower()
     if requested_vision_provider != text_provider:
         raise ModelRoutingValidationError(
             "视觉理解必须与文本分析使用同一家厂商，不能单独切换视觉厂商。"
         )
-    if request.vision_enabled and not text_spec.vision_models:
+    custom_vision_model = request.vision_model.strip() if request.vision_model else ""
+    if request.vision_enabled and not text_spec.vision_models and not (
+        text_spec.customizable and custom_vision_model
+    ):
         raise ModelRoutingValidationError(
-            f"{text_spec.label} 官方托管 API 当前不提供视觉模型，请关闭图表理解。"
+            f"{provider_label(text_provider)} 未配置可用的视觉模型，请关闭图表理解。"
         )
 
-    vision_model = text_spec.default_vision_model or ""
-    if request.vision_model and request.vision_model.strip() not in {vision_model, ""}:
+    vision_model = (
+        _validated_model_id(custom_vision_model, "视觉模型")
+        if text_spec.customizable and custom_vision_model
+        else text_spec.default_vision_model or ""
+    )
+    if not text_spec.customizable and request.vision_model and request.vision_model.strip() not in {vision_model, ""}:
         raise ModelRoutingValidationError(
             f"视觉模型由系统自动配对为 {vision_model or '不可用'}，不能单独修改。"
         )
@@ -257,10 +338,14 @@ def configure_model_routing(
     values: dict[str, str] = {
         "TEXT_PROVIDER": text_provider,
         "MODEL_NAME": text_model,
+        "MODEL_MODE": text_mode,
         "ENABLE_VISION_SUMMARY": "true" if request.vision_enabled else "false",
         "VISION_PROVIDER": text_provider,
         "VISION_MODEL_NAME": vision_model,
     }
+    if text_spec.customizable:
+        values["CUSTOM_TEXT_MODEL"] = text_model
+        values["CUSTOM_VISION_MODEL"] = vision_model
 
     with _SETTINGS_LOCK:
         _persist_env_values(values, env_path)
@@ -276,10 +361,30 @@ def _probe_provider_api_key(
     api_key: str,
     base_url: str,
     model: str,
+    *,
+    protocol: str | None = None,
 ) -> list[str]:
     """Verify a credential, preferring the cheap model-list endpoint."""
-    spec = provider_spec(provider_id)
     timeout = min(float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")), 30.0)
+    wire_protocol = protocol or provider_protocol(provider_id)
+    if wire_protocol == "anthropic":
+        try:
+            response = ChatAnthropic(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                max_retries=0,
+                max_tokens=8,
+            ).invoke([HumanMessage(content="只回复 OK")])
+        except Exception as exc:
+            raise ApiKeyValidationError(
+                f"{provider_label(provider_id)} 验证请求失败，请确认 Key、Base URL、协议和模型 ID 可用。"
+            ) from exc
+        if not getattr(response, "content", None):
+            raise ApiKeyValidationError("模型验证未返回结果，请稍后重试。")
+        return []
+
     try:
         page = OpenAI(
             api_key=api_key,
@@ -299,7 +404,7 @@ def _probe_provider_api_key(
     except Exception as exc:
         if getattr(exc, "status_code", None) in {401, 403}:
             raise ApiKeyValidationError(
-                f"{spec.label} 拒绝了该 API Key，请确认密钥有效且具有模型访问权限。"
+                f"{provider_label(provider_id)} 拒绝了该 API Key，请确认密钥有效且具有模型访问权限。"
             ) from exc
 
     kwargs: dict[str, Any] = {
@@ -310,13 +415,19 @@ def _probe_provider_api_key(
         "max_retries": 0,
         "max_tokens": 8,
     }
-    if not (provider_id == "openai" and model.startswith("gpt-5")):
+    modes = model_modes(provider_id, model)
+    if modes:
+        kwargs["extra_body"] = model_mode_request_body(provider_id, model, modes[0].id)
+    if not (
+        (provider_id == "openai" and model.startswith("gpt-5"))
+        or provider_id in {"kimi", "deepseek"}
+    ):
         kwargs["temperature"] = 0
     try:
         response = ChatOpenAI(**kwargs).invoke([HumanMessage(content="只回复 OK")])
     except Exception as exc:
         raise ApiKeyValidationError(
-            f"{spec.label} 验证请求失败，请确认 Key、Base URL 和所选模型可用。"
+            f"{provider_label(provider_id)} 验证请求失败，请确认 Key、Base URL 和所选模型可用。"
         ) from exc
     if not getattr(response, "content", None):
         raise ApiKeyValidationError("模型验证未返回结果，请稍后重试。")

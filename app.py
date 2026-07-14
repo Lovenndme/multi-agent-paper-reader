@@ -85,7 +85,7 @@ from core.history import (
 from core.model_health import model_catalog_health
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.model_providers import (
-    provider_spec,
+    provider_label,
     selected_text_model,
     selected_text_model_label,
     selected_vision_model,
@@ -341,19 +341,19 @@ def _model_runtime_payload() -> dict[str, Any]:
     visual_provider = vision_provider_id()
     return {
         "text_provider": text_provider,
-        "text_provider_label": provider_spec(text_provider).label,
+        "text_provider_label": provider_label(text_provider),
         "text_model": selected_text_model(),
         "text_model_label": selected_text_model_label(),
         "vision_enabled": vision_enabled(),
         "vision_provider": visual_provider,
-        "vision_provider_label": provider_spec(visual_provider).label,
+        "vision_provider_label": provider_label(visual_provider),
         "vision_model": selected_vision_model(),
     }
 
 
 def _missing_model_key_message() -> str:
-    spec = provider_spec(text_provider_id())
-    return f"{spec.label} API Key 未配置，请在 Settings 中添加当前文本模型所需的密钥。"
+    provider_id = text_provider_id()
+    return f"{provider_label(provider_id)} API Key 未配置，请在 Settings 中添加当前文本模型所需的密钥。"
 
 
 def _stream_demo_tokens(agent_id: str, output: dict[str, Any]) -> Iterable[str]:
@@ -979,6 +979,10 @@ def update_provider_api_key(
             provider_id,
             request.api_key.get_secret_value(),
             base_url=request.base_url,
+            protocol=request.protocol,
+            provider_name=request.provider_name,
+            text_model=request.text_model,
+            vision_model=request.vision_model,
         )
     except ApiKeyValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

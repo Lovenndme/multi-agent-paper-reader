@@ -13,6 +13,7 @@ from utils.llm import (
     get_chat_llm,
     get_llm,
     get_vision_llm,
+    invoke_vision_image_summary,
     is_vision_configured,
     parse_structured_output,
     start_text_model_call_trace,
@@ -130,7 +131,7 @@ class TestStructuredOutputParsing(unittest.TestCase):
                 "TEXT_PROVIDER": "doubao",
                 "ARK_API_KEY": "doubao-test-key",
                 "DOUBAO_BASE_URL": "https://ark.example/api/v3",
-                "MODEL_NAME": "doubao-seed-2-0-lite-260215",
+                "MODEL_NAME": "doubao-seed-2.1-turbo",
             },
             clear=True,
         ):
@@ -140,7 +141,120 @@ class TestStructuredOutputParsing(unittest.TestCase):
 
         self.assertEqual(api_key, "doubao-test-key")
         self.assertEqual(base_url, "https://ark.example/api/v3")
-        self.assertEqual(llm.model_name, "doubao-seed-2-0-lite-260215")
+        self.assertEqual(llm.model_name, "doubao-seed-2.1-turbo")
+
+    def test_anthropic_route_constructs_messages_client(self):
+        get_llm.cache_clear()
+        fake_client = SimpleNamespace(model="claude-sonnet-5")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "anthropic",
+                    "ANTHROPIC_API_KEY": "anthropic-test-key",
+                    "ANTHROPIC_BASE_URL": "https://anthropic.example",
+                    "MODEL_NAME": "claude-sonnet-5",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.ChatAnthropic", return_value=fake_client) as client_class,
+        ):
+            llm = get_llm()
+
+        self.assertIs(llm, fake_client)
+        kwargs = client_class.call_args.kwargs
+        self.assertEqual(kwargs["model"], "claude-sonnet-5")
+        self.assertEqual(kwargs["base_url"], "https://anthropic.example")
+        self.assertNotIn("temperature", kwargs)
+
+    def test_kimi_k2_6_fast_mode_is_sent_to_the_upstream_request(self):
+        get_llm.cache_clear()
+        fake_client = SimpleNamespace(model_name="kimi-k2.6")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "kimi",
+                    "MOONSHOT_API_KEY": "kimi-test-key",
+                    "MODEL_NAME": "kimi-k2.6",
+                    "MODEL_MODE": "disabled",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.ChatOpenAI", return_value=fake_client) as client_class,
+        ):
+            llm = get_llm()
+
+        self.assertIs(llm, fake_client)
+        kwargs = client_class.call_args.kwargs
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("temperature", kwargs)
+
+    def test_glm_5_2_deep_mode_sends_max_reasoning_effort(self):
+        get_llm.cache_clear()
+        fake_client = SimpleNamespace(model_name="glm-5.2")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "zhipu",
+                    "GLM_API_KEY": "glm-test-key",
+                    "MODEL_NAME": "glm-5.2",
+                    "MODEL_MODE": "deep",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.ChatOpenAI", return_value=fake_client) as client_class,
+        ):
+            get_llm()
+
+        self.assertEqual(
+            client_class.call_args.kwargs["extra_body"],
+            {"thinking": {"type": "enabled"}, "reasoning_effort": "max"},
+        )
+
+    def test_qwen_fast_mode_sends_enable_thinking_false(self):
+        get_llm.cache_clear()
+        fake_client = SimpleNamespace(model_name="qwen3.7-max")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "qwen",
+                    "DASHSCOPE_API_KEY": "qwen-test-key",
+                    "MODEL_NAME": "qwen3.7-max",
+                    "MODEL_MODE": "fast",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.ChatOpenAI", return_value=fake_client) as client_class,
+        ):
+            get_llm()
+
+        self.assertEqual(client_class.call_args.kwargs["extra_body"], {"enable_thinking": False})
+
+    def test_anthropic_vision_uses_native_base64_image_block(self):
+        response = AIMessage(content="图表摘要")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "anthropic",
+                    "ANTHROPIC_API_KEY": "anthropic-test-key",
+                    "ENABLE_VISION_SUMMARY": "true",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.get_vision_llm", return_value=object()),
+            patch("utils.llm.invoke_with_retry", return_value=response) as invoke,
+        ):
+            summary = invoke_vision_image_summary(b"png", "描述图片")
+
+        message = invoke.call_args.args[1][0]
+        image_block = message.content[1]
+        self.assertEqual(summary, "图表摘要")
+        self.assertEqual(image_block["type"], "image")
+        self.assertEqual(image_block["source"]["media_type"], "image/png")
 
     def test_vision_route_ignores_a_different_legacy_provider(self):
         get_vision_llm.cache_clear()

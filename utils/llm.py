@@ -13,16 +13,21 @@ from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from core.model_providers import (
+    model_mode_request_body,
     model_display_label,
     provider_api_key,
     provider_base_url,
+    provider_label,
+    provider_protocol,
     provider_spec,
     selected_text_model,
+    selected_text_mode,
     selected_vision_model,
     text_provider_id,
     vision_enabled,
@@ -37,8 +42,8 @@ _env_path = Path(
 )
 load_dotenv(dotenv_path=_env_path, override=False)
 
-# Temperature env var lets users override without code changes.
-# Default 1.0 is required by some providers (e.g. kimi-k2.5).
+# Temperature remains configurable for providers that accept sampling controls.
+# Providers with explicit reasoning modes use their documented server defaults.
 _DEFAULT_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "1.0"))
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -59,14 +64,14 @@ def is_llm_configured() -> bool:
 
 
 @lru_cache(maxsize=1)
-def get_llm() -> ChatOpenAI:
-    """Return a cached ChatOpenAI instance configured from environment variables."""
+def get_llm():
+    """Return a cached chat model using the provider's declared wire protocol."""
     provider_id = text_provider_id()
     api_key = get_api_key(provider_id)
     if not api_key:
         raise EnvironmentError(_missing_key_message(provider_id))
 
-    return ChatOpenAI(
+    return _build_chat_model(
         **_client_kwargs(
             provider_id=provider_id,
             model=selected_text_model(),
@@ -79,14 +84,14 @@ def get_llm() -> ChatOpenAI:
 
 
 @lru_cache(maxsize=1)
-def get_chat_llm() -> ChatOpenAI:
+def get_chat_llm():
     """Return the same text model with a lower temperature for grounded paper QA."""
     provider_id = text_provider_id()
     api_key = get_api_key(provider_id)
     if not api_key:
         raise EnvironmentError(_missing_key_message(provider_id))
 
-    return ChatOpenAI(
+    return _build_chat_model(
         **_client_kwargs(
             provider_id=provider_id,
             model=selected_text_model(),
@@ -99,14 +104,14 @@ def get_chat_llm() -> ChatOpenAI:
 
 
 @lru_cache(maxsize=1)
-def get_vision_llm() -> ChatOpenAI:
-    """Return a cached vision-capable ChatOpenAI-compatible client."""
+def get_vision_llm():
+    """Return a cached vision client using the selected provider protocol."""
     provider_id = vision_provider_id()
     api_key = get_api_key(provider_id)
     if not api_key:
         raise EnvironmentError(_missing_key_message(provider_id))
 
-    return ChatOpenAI(
+    return _build_chat_model(
         **_client_kwargs(
             provider_id=provider_id,
             model=selected_vision_model(),
@@ -123,7 +128,7 @@ def is_vision_configured() -> bool:
     provider_id = vision_provider_id()
     return (
         vision_enabled()
-        and bool(provider_spec(provider_id).vision_models)
+        and (bool(provider_spec(provider_id).vision_models) or provider_spec(provider_id).customizable)
         and bool(get_api_key(provider_id))
         and bool(selected_vision_model())
     )
@@ -139,6 +144,7 @@ def _client_kwargs(
     max_retries: int,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
+        "provider_id": provider_id,
         "model": model,
         "api_key": api_key,
         "base_url": get_base_url(provider_id),
@@ -146,11 +152,37 @@ def _client_kwargs(
         "timeout": timeout,
         "max_retries": max_retries,
     }
-    # Current GPT-5-family endpoints may reject sampling parameters depending
-    # on the selected reasoning mode. Omitting temperature works for all modes.
-    if not (provider_id == "openai" and model.startswith("gpt-5")):
+    mode = selected_text_mode() if provider_id == text_provider_id() else ""
+    mode_body = model_mode_request_body(provider_id, model, mode) if mode else {}
+    if mode_body:
+        kwargs["extra_body"] = mode_body
+    # GPT-5, current Claude adaptive-thinking models, Kimi K2.6 and DeepSeek V4
+    # have model-specific sampling constraints. Their server defaults are valid
+    # across supported modes, so do not send a conflicting temperature.
+    if not (
+        (provider_id == "openai" and model.startswith("gpt-5"))
+        or provider_protocol(provider_id) == "anthropic"
+        or provider_id in {"kimi", "deepseek"}
+    ):
         kwargs["temperature"] = temperature
     return kwargs
+
+
+def _build_chat_model(**kwargs: Any):
+    """Construct an OpenAI Chat Completions or Anthropic Messages client."""
+    provider_id = kwargs.pop("provider_id", None)
+    if provider_id and provider_protocol(provider_id) == "anthropic":
+        model = kwargs.pop("model")
+        kwargs.pop("include_response_headers", None)
+        base_url = kwargs.pop("base_url")
+        api_key = kwargs.pop("api_key")
+        return ChatAnthropic(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            **kwargs,
+        )
+    return ChatOpenAI(**kwargs)
 
 
 def _missing_key_message(provider_id: str) -> str:
@@ -168,14 +200,22 @@ def reset_llm_clients() -> None:
     get_vision_llm.cache_clear()
 
 
-def start_text_model_call_trace(llm: ChatOpenAI) -> dict[str, Any]:
+def start_text_model_call_trace(llm: Any) -> dict[str, Any]:
     """Snapshot the actual cached client used for one text-model request."""
     provider_id = text_provider_id()
-    requested_model = str(getattr(llm, "model_name", "") or selected_text_model())
-    base_url = str(getattr(llm, "openai_api_base", "") or get_base_url(provider_id))
+    requested_model = str(
+        getattr(llm, "model_name", "")
+        or getattr(llm, "model", "")
+        or selected_text_model()
+    )
+    base_url = str(
+        getattr(llm, "openai_api_base", "")
+        or getattr(llm, "anthropic_api_url", "")
+        or get_base_url(provider_id)
+    )
     return {
         "provider": provider_id,
-        "provider_label": provider_spec(provider_id).label,
+        "provider_label": provider_label(provider_id),
         "requested_model": requested_model,
         "requested_model_label": model_display_label(provider_id, "text", requested_model),
         "endpoint_host": urlparse(base_url).netloc,
@@ -226,17 +266,28 @@ def invoke_vision_image_summary(
     delay: float = 2.0,
 ) -> str:
     """Ask the configured vision model to summarize one rendered PDF visual."""
-    data_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    if provider_protocol(vision_provider_id()) == "anthropic":
+        image_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": encoded_image,
+            },
+        }
+    else:
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64," + encoded_image},
+        }
     message = HumanMessage(
         content=[
             {
                 "type": "text",
                 "text": prompt,
             },
-            {
-                "type": "image_url",
-                "image_url": {"url": data_url},
-            },
+            image_block,
         ]
     )
     response = invoke_with_retry(get_vision_llm(), [message], retries=retries, delay=delay)

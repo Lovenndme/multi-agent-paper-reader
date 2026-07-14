@@ -30,7 +30,6 @@ import {
   IconPlus,
   IconPhoto,
   IconQuote,
-  IconRefresh,
   IconSearch,
   IconSend,
   IconSettings,
@@ -74,6 +73,7 @@ const completeAgentStates = {
 const defaultSettingsRouting = {
   text_provider: "zhipu",
   text_model: "glm-5.2",
+  text_mode: "",
   vision_enabled: true,
   vision_provider: "zhipu",
   vision_model: "glm-5v-turbo",
@@ -1090,14 +1090,15 @@ function SettingsDialog({
   status,
   loading,
   error,
-  modelHealth,
-  healthLoading,
-  healthError,
   routing,
   credentialProvider,
   baseUrl,
   apiKey,
   apiKeyVisible,
+  customProtocol,
+  customProviderName,
+  customTextModel,
+  customVisionModel,
   saving,
   feedback,
   onRoutingChange,
@@ -1106,15 +1107,18 @@ function SettingsDialog({
   onBaseUrlChange,
   onApiKeyChange,
   onToggleApiKey,
+  onCustomFieldChange,
   onSaveApiKey,
-  onRefreshHealth,
   onRetry,
   onClose,
 }) {
   const providers = status?.providers || [];
   const textProvider = providers.find((provider) => provider.id === routing.text_provider) || providers[0];
+  const selectedTextModel = textProvider?.text_models?.find((model) => model.id === routing.text_model);
+  const textModes = selectedTextModel?.modes || [];
   const visionProvider = textProvider;
   const credential = providers.find((provider) => provider.id === credentialProvider) || providers[0];
+  const isCustomCredential = credential?.customizable;
   const configuredProviderCount = providers.filter((provider) => provider.configured).length;
 
   return (
@@ -1163,7 +1167,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.2.1"}</strong>
+                <strong>{status.version || "V1.2.2"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1173,66 +1177,6 @@ function SettingsDialog({
               </div>
             </div>
 
-            <section className="settings-section model-health-section">
-              <header>
-                <div>
-                  <h3>模型可用性</h3>
-                  <small>
-                    {modelHealth?.checked_at
-                      ? `自动验证于 ${new Date(modelHealth.checked_at).toLocaleString()}`
-                      : "打开 Settings 时自动验证已配置厂商；视觉模型会发起最小真实请求"}
-                  </small>
-                </div>
-                <button
-                  className="settings-secondary-action"
-                  type="button"
-                  onClick={onRefreshHealth}
-                  disabled={healthLoading}
-                >
-                  <IconRefresh className={healthLoading ? "spin" : ""} size={15} />
-                  {healthLoading ? "验证中" : "立即验证"}
-                </button>
-              </header>
-              {healthError && (
-                <div className="settings-health-error" role="status">
-                  <IconAlertCircle size={15} />
-                  <span>{healthError}</span>
-                </div>
-              )}
-              <div className="settings-health-grid" aria-busy={healthLoading}>
-                {(modelHealth?.providers || providers.map((provider) => ({
-                  id: provider.id,
-                  label: provider.label,
-                  status: provider.configured ? "checking" : "unconfigured",
-                  message: provider.configured ? "等待真实验证。" : "未配置 API Key。",
-                }))).map((provider) => {
-                  const statusLabels = {
-                    ok: "正常",
-                    drift: "目录变化",
-                    unavailable: "不可用",
-                    unconfigured: "未配置",
-                    checking: "等待检查",
-                  };
-                  const missingModels = [
-                    ...(provider.missing_text_models || []),
-                    ...(provider.missing_vision_models || []),
-                  ];
-                  return (
-                    <article className={`settings-health-card ${provider.status}`} key={provider.id}>
-                      <div>
-                        <strong>{provider.label}</strong>
-                        <span><i /> {statusLabels[provider.status] || provider.status}</span>
-                      </div>
-                      <small>{provider.message}</small>
-                      {missingModels.length > 0 && (
-                        <code title={missingModels.join(", ")}>缺失：{missingModels.join(", ")}</code>
-                      )}
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-
             <section className="settings-section model-routing-section">
               <header>
                 <div>
@@ -1240,13 +1184,17 @@ function SettingsDialog({
                   <small>视觉理解自动跟随文本厂商</small>
                 </div>
                 <button
-                  className="settings-secondary-action"
+                  className={`settings-secondary-action apply-routing ${feedback?.scope === "routing" ? feedback.tone : ""}`}
                   type="button"
                   onClick={onSaveRouting}
                   disabled={saving || !routing.text_model}
                 >
                   {saving && feedback?.scope === "routing" ? <IconLoader2 className="spin" size={15} /> : <IconCheck size={15} />}
-                  应用配置
+                  {saving && feedback?.scope === "routing"
+                    ? "正在应用"
+                    : feedback?.scope === "routing" && feedback.tone === "success"
+                      ? "已应用"
+                      : "应用配置"}
                 </button>
               </header>
               <div className="settings-route-list">
@@ -1281,6 +1229,29 @@ function SettingsDialog({
                   <span className={`model-state ${textProvider?.configured ? "configured" : "unconfigured"}`}>
                     <i /> {textProvider?.configured ? "Key 已配置" : "缺少 Key"}
                   </span>
+                  {textModes.length > 0 && (
+                    <div className="settings-mode-panel">
+                      <div className="settings-mode-copy">
+                        <strong>响应模式</strong>
+                        <small>{textModes.find((mode) => mode.id === routing.text_mode)?.description || textModes[0].description}</small>
+                      </div>
+                      <div className="settings-mode-switch" role="group" aria-label={`${selectedTextModel?.label || "当前模型"}响应模式`}>
+                        {textModes.map((mode) => (
+                          <button
+                            type="button"
+                            className={routing.text_mode === mode.id ? "active" : ""}
+                            aria-pressed={routing.text_mode === mode.id}
+                            onClick={() => onRoutingChange("text_mode", mode.id)}
+                            disabled={saving}
+                            key={mode.id}
+                          >
+                            {routing.text_mode === mode.id && <IconCheck size={13} />}
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className={`settings-route-row vision-route ${routing.vision_enabled ? "" : "disabled"}`}>
@@ -1329,11 +1300,52 @@ function SettingsDialog({
                   <h3>厂商凭据</h3>
                   <small>密钥按厂商分别保存在本机</small>
                 </div>
-                <a href={credential?.key_url} target="_blank" rel="noreferrer">
-                  获取 Key <IconExternalLink size={13} />
-                </a>
+                {credential?.key_url
+                  ? (
+                    <a href={credential.key_url} target="_blank" rel="noreferrer">
+                      获取 Key <IconExternalLink size={13} />
+                    </a>
+                  )
+                  : <span className="settings-relay-badge">自有模型服务</span>}
               </header>
               <form onSubmit={onSaveApiKey}>
+                {isCustomCredential && (
+                  <div className="settings-custom-relay">
+                    <div className="settings-protocol-field">
+                      <span>兼容协议</span>
+                      <div className="settings-protocol-switch" role="group" aria-label="中转站兼容协议">
+                        {[
+                          ["openai", "OpenAI Compatible"],
+                          ["anthropic", "Anthropic Compatible"],
+                        ].map(([value, label]) => (
+                          <button
+                            type="button"
+                            className={customProtocol === value ? "active" : ""}
+                            aria-pressed={customProtocol === value}
+                            onClick={() => onCustomFieldChange("protocol", value)}
+                            disabled={saving}
+                            key={value}
+                          >
+                            {customProtocol === value && <IconCheck size={13} />} {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label>
+                      <span>中转站名称</span>
+                      <input value={customProviderName} onChange={(event) => onCustomFieldChange("provider_name", event.target.value)} disabled={saving} placeholder="例如：团队模型网关" />
+                    </label>
+                    <label>
+                      <span>文本模型 ID</span>
+                      <input value={customTextModel} onChange={(event) => onCustomFieldChange("text_model", event.target.value)} disabled={saving} placeholder="必填，由中转站提供" required />
+                    </label>
+                    <label>
+                      <span>视觉模型 ID（可选）</span>
+                      <input value={customVisionModel} onChange={(event) => onCustomFieldChange("vision_model", event.target.value)} disabled={saving} placeholder="留空即明确关闭图表理解" />
+                    </label>
+                    <p><IconAlertCircle size={15} /> 协议必须与中转站实际接口一致；保存时会用文本模型发起最小真实请求。</p>
+                  </div>
+                )}
                 <div className="settings-credential-grid">
                   <label>
                     <span>模型厂商</span>
@@ -1356,6 +1368,7 @@ function SettingsDialog({
                       value={baseUrl}
                       onChange={(event) => onBaseUrlChange(event.target.value)}
                       disabled={saving}
+                      required={isCustomCredential}
                       spellCheck="false"
                     />
                   </label>
@@ -1385,7 +1398,7 @@ function SettingsDialog({
                 </div>
                 <div className="settings-key-footer">
                   <small>仅写入本机 <code>.env</code>，保存后不会回显。</small>
-                  <button type="submit" disabled={apiKey.trim().length < 10 || saving}>
+                  <button type="submit" disabled={apiKey.trim().length < 10 || saving || (isCustomCredential && (!customTextModel.trim() || !baseUrl.trim()))}>
                     {saving && feedback?.scope === "credential" ? <IconLoader2 className="spin" size={16} /> : <IconShieldCheck size={16} />}
                     {saving && feedback?.scope === "credential" ? "正在验证" : "验证并保存"}
                   </button>
@@ -1416,14 +1429,15 @@ export function App() {
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState("");
-  const [settingsModelHealth, setSettingsModelHealth] = useState(null);
-  const [settingsHealthLoading, setSettingsHealthLoading] = useState(false);
-  const [settingsHealthError, setSettingsHealthError] = useState("");
   const [settingsRouting, setSettingsRouting] = useState(defaultSettingsRouting);
   const [settingsCredentialProvider, setSettingsCredentialProvider] = useState("zhipu");
   const [settingsBaseUrl, setSettingsBaseUrl] = useState("");
   const [settingsApiKey, setSettingsApiKey] = useState("");
   const [settingsApiKeyVisible, setSettingsApiKeyVisible] = useState(false);
+  const [settingsCustomProtocol, setSettingsCustomProtocol] = useState("openai");
+  const [settingsCustomProviderName, setSettingsCustomProviderName] = useState("自定义中转站");
+  const [settingsCustomTextModel, setSettingsCustomTextModel] = useState("");
+  const [settingsCustomVisionModel, setSettingsCustomVisionModel] = useState("");
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsFeedback, setSettingsFeedback] = useState(null);
   const [chaptersOpen, setChaptersOpen] = useState(true);
@@ -1588,37 +1602,28 @@ export function App() {
       const visionRoute = payload.routing?.vision;
       const initialCredentialProvider = textRoute?.provider || payload.providers?.[0]?.id || "zhipu";
       const initialCredential = payload.providers?.find((provider) => provider.id === initialCredentialProvider);
+      const customProvider = payload.providers?.find((provider) => provider.id === "custom");
       setSettingsStatus(payload);
       setSettingsRouting({
         text_provider: textRoute?.provider || "zhipu",
         text_model: textRoute?.model || "glm-5.2",
+        text_mode: textRoute?.mode
+          || initialCredential?.text_models?.find((model) => model.id === textRoute?.model)?.default_mode
+          || "",
         vision_enabled: Boolean(visionRoute?.enabled && initialCredential?.supports_vision),
         vision_provider: textRoute?.provider || "zhipu",
         vision_model: initialCredential?.default_vision_model || "",
       });
       setSettingsCredentialProvider(initialCredentialProvider);
       setSettingsBaseUrl(initialCredential?.base_url || "");
+      setSettingsCustomProtocol(customProvider?.protocol || "openai");
+      setSettingsCustomProviderName(customProvider?.provider_name || "自定义中转站");
+      setSettingsCustomTextModel(customProvider?.configured ? customProvider.default_text_model || "" : "");
+      setSettingsCustomVisionModel(customProvider?.default_vision_model || "");
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "无法读取应用配置。");
     } finally {
       setSettingsLoading(false);
-    }
-  }
-
-  async function loadModelHealth(force = false) {
-    if (settingsHealthLoading) return;
-    setSettingsHealthLoading(true);
-    setSettingsHealthError("");
-    try {
-      const suffix = force ? "?force=true" : "";
-      const response = await fetch(`/api/settings/model-health${suffix}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || `模型可用性验证失败（HTTP ${response.status}）`);
-      setSettingsModelHealth(payload);
-    } catch (error) {
-      setSettingsHealthError(error instanceof Error ? error.message : "模型可用性验证失败。");
-    } finally {
-      setSettingsHealthLoading(false);
     }
   }
 
@@ -1631,7 +1636,6 @@ export function App() {
     setSettingsFeedback(null);
     setSettingsOpen(true);
     void loadApplicationSettings();
-    void loadModelHealth();
   }
 
   function closeApplicationSettings() {
@@ -1657,10 +1661,16 @@ export function App() {
           ...current,
           text_provider: value,
           text_model: provider?.default_text_model || "",
+          text_mode: provider?.text_models?.[0]?.default_mode || "",
           vision_provider: value,
           vision_model: provider?.default_vision_model || "",
           vision_enabled: Boolean(provider?.supports_vision),
         };
+      }
+      if (field === "text_model") {
+        const provider = settingsStatus?.providers?.find((item) => item.id === current.text_provider);
+        const model = provider?.text_models?.find((item) => item.id === value);
+        return { ...current, text_model: value, text_mode: model?.default_mode || "" };
       }
       return { ...current, [field]: value };
     });
@@ -1673,6 +1683,17 @@ export function App() {
     setSettingsBaseUrl(provider?.base_url || "");
     setSettingsApiKey("");
     setSettingsApiKeyVisible(false);
+    setSettingsFeedback(null);
+  }
+
+  function changeCustomRelayField(field, value) {
+    const setters = {
+      protocol: setSettingsCustomProtocol,
+      provider_name: setSettingsCustomProviderName,
+      text_model: setSettingsCustomTextModel,
+      vision_model: setSettingsCustomVisionModel,
+    };
+    setters[field]?.(value);
     setSettingsFeedback(null);
   }
 
@@ -1731,7 +1752,16 @@ export function App() {
       const response = await fetch(`/api/settings/providers/${encodeURIComponent(settingsCredentialProvider)}/api-key`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKey, base_url: settingsBaseUrl.trim() }),
+        body: JSON.stringify({
+          api_key: apiKey,
+          base_url: settingsBaseUrl.trim(),
+          ...(settingsCredentialProvider === "custom" ? {
+            protocol: settingsCustomProtocol,
+            provider_name: settingsCustomProviderName.trim(),
+            text_model: settingsCustomTextModel.trim(),
+            vision_model: settingsCustomVisionModel.trim(),
+          } : {}),
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `API Key 保存失败（HTTP ${response.status}）`);
@@ -1740,6 +1770,16 @@ export function App() {
       setSettingsBaseUrl(updatedProvider?.base_url || settingsBaseUrl);
       setSettingsApiKey("");
       setSettingsApiKeyVisible(false);
+      if (settingsCredentialProvider === "custom") {
+        setSettingsRouting({
+          text_provider: "custom",
+          text_model: updatedProvider?.default_text_model || settingsCustomTextModel.trim(),
+          text_mode: "",
+          vision_enabled: Boolean(updatedProvider?.supports_vision),
+          vision_provider: "custom",
+          vision_model: updatedProvider?.default_vision_model || "",
+        });
+      }
       const discoveredCount = payload.settings?.validation?.available_model_count || 0;
       setSettingsFeedback({
         scope: "credential",
@@ -1748,7 +1788,6 @@ export function App() {
           ? `API Key 已验证并保存，同时识别到 ${discoveredCount} 个可用模型。`
           : "API Key 已通过真实请求验证并保存。",
       });
-      void loadModelHealth(true);
     } catch (error) {
       setSettingsFeedback({
         scope: "credential",
@@ -2777,14 +2816,15 @@ export function App() {
           status={settingsStatus}
           loading={settingsLoading}
           error={settingsError}
-          modelHealth={settingsModelHealth}
-          healthLoading={settingsHealthLoading}
-          healthError={settingsHealthError}
           routing={settingsRouting}
           credentialProvider={settingsCredentialProvider}
           baseUrl={settingsBaseUrl}
           apiKey={settingsApiKey}
           apiKeyVisible={settingsApiKeyVisible}
+          customProtocol={settingsCustomProtocol}
+          customProviderName={settingsCustomProviderName}
+          customTextModel={settingsCustomTextModel}
+          customVisionModel={settingsCustomVisionModel}
           saving={settingsSaving}
           feedback={settingsFeedback}
           onRoutingChange={changeSettingsRouting}
@@ -2799,8 +2839,8 @@ export function App() {
             if (settingsFeedback) setSettingsFeedback(null);
           }}
           onToggleApiKey={() => setSettingsApiKeyVisible((value) => !value)}
+          onCustomFieldChange={changeCustomRelayField}
           onSaveApiKey={saveApplicationApiKey}
-          onRefreshHealth={() => void loadModelHealth(true)}
           onRetry={() => void loadApplicationSettings()}
           onClose={closeApplicationSettings}
         />
