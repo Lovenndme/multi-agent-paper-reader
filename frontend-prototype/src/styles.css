@@ -348,6 +348,16 @@ button {
   box-shadow: 0 0 0 4px rgba(24, 167, 101, 0.1);
 }
 
+.section-heading small.parsing {
+  color: #1478df;
+}
+
+.section-heading small.parsing i {
+  background: #2587ef;
+  box-shadow: 0 0 0 4px rgba(37, 135, 239, 0.12);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
 .paper-card,
 .recent,
 .chapters {
@@ -373,12 +383,6 @@ button {
   color: #0f2236;
   font-size: 13px;
   line-height: 1.45;
-}
-
-.paper-card p {
-  margin: 4px 0 0;
-  color: rgba(34, 58, 82, 0.72);
-  font-size: 12px;
 }
 
 .paper-stats {

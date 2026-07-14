@@ -1164,6 +1164,28 @@ def remove_history_analysis(history_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/papers/preview")
+async def preview_paper(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Parse PDF metadata and sections without running agents or model calls."""
+    filename = Path(file.filename or "paper.pdf").name or "paper.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+
+    with tempfile.TemporaryDirectory(prefix="paper-reader-preview-") as tmpdir:
+        pdf_path = Path(tmpdir) / filename
+        pdf_path.write_bytes(data)
+        try:
+            parsed = parse_pdf(pdf_path)
+        except Exception as exc:  # noqa: BLE001 - return actionable parser details
+            raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
+
+    return {"paper": _paper_payload(parsed, filename, len(data))}
+
+
 @app.post("/api/analyze")
 async def analyze_paper(
     file: UploadFile = File(...),

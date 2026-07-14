@@ -362,10 +362,10 @@ function pendingAnalysisForFile(file) {
   return {
     mode: "pending",
     paper: {
-      title: file.name.replace(/\.pdf$/i, "") || "Uploaded Paper",
+      title: "正在读取论文标题…",
       filename: file.name,
-      pages: "Pending",
-      sections_count: "Pending",
+      pages: null,
+      sections_count: null,
       size_bytes: file.size,
       sections: [],
     },
@@ -1198,7 +1198,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.3.2"}</strong>
+                <strong>{status.version || "V1.3.3"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1475,6 +1475,7 @@ export function App() {
   const [toast, setToast] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [paperPreviewLoading, setPaperPreviewLoading] = useState(false);
   const [selectedChapterIndex, setSelectedChapterIndex] = useState(0);
   const [analysisData, setAnalysisData] = useState(sampleAnalysis);
   const [analysisError, setAnalysisError] = useState("");
@@ -1503,11 +1504,15 @@ export function App() {
   const resultsPanelRef = useRef(null);
   const resultsScrollRef = useRef(null);
   const chatAbortRef = useRef(null);
+  const paperPreviewAbortRef = useRef(null);
 
   useEffect(() => {
     void loadPaperHistory();
     void loadApplicationSettings();
-    return () => chatAbortRef.current?.abort();
+    return () => {
+      chatAbortRef.current?.abort();
+      paperPreviewAbortRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -1533,7 +1538,7 @@ export function App() {
   const sourceSections = displayedPaper.sections?.length
     ? displayedPaper.sections
     : selectedFile
-      ? [{ title: "等待解析", display_title: "等待解析", chars: 0 }]
+      ? [{ title: paperPreviewLoading ? "正在解析 PDF 章节" : "尚未识别到章节", chars: 0 }]
       : sampleAnalysis.paper.sections;
   const agents = useMemo(
     () =>
@@ -1591,7 +1596,9 @@ export function App() {
   const displaySections = sourceSections.map((chapter, index) => ({
         ...chapter,
         displayTitle: originalChapterTitle(chapter, index),
-        meta: selectedFile && !hasParsedSections ? "点击 Analyze Paper 后自动识别章节" : chapterMeta(chapter),
+        meta: selectedFile && !hasParsedSections
+          ? paperPreviewLoading ? "正在读取标题、页码与章节结构" : "PDF 未能识别出章节结构"
+          : chapterMeta(chapter),
         status: chapterStatus(chapter, {
           selectedFile,
           hasParsedSections,
@@ -2002,6 +2009,9 @@ export function App() {
       const payload = await response.json();
       chatAbortRef.current?.abort();
       chatAbortRef.current = null;
+      paperPreviewAbortRef.current?.abort();
+      paperPreviewAbortRef.current = null;
+      setPaperPreviewLoading(false);
       setSelectedFile(null);
       setSelectedChapterIndex(0);
       setActiveTab("概览");
@@ -2057,19 +2067,23 @@ export function App() {
     }
   }
 
-  function chooseFile(file) {
+  async function chooseFile(file) {
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       setAnalysisError("Please select a PDF file.");
       showToast("PDF files only");
       return;
     }
+    paperPreviewAbortRef.current?.abort();
+    const controller = new AbortController();
+    paperPreviewAbortRef.current = controller;
     setSelectedFile(file);
+    setPaperPreviewLoading(true);
     setSelectedChapterIndex(0);
     setAnalysisError("");
     setAgentStates(emptyAgentStates);
     setAgentStreams(emptyAgentStreams);
-    setStreamMessage("PDF 已选择，可以开始流式分析。");
+    setStreamMessage("正在解析 PDF 标题、页码和章节结构…");
     setAnalysisData(pendingAnalysisForFile(file));
     chatAbortRef.current?.abort();
     chatAbortRef.current = null;
@@ -2079,7 +2093,37 @@ export function App() {
     setChatQuote("");
     setChatInput("");
     resetChatConversations();
-    showToast("PDF ready for analysis");
+    showToast("正在解析 PDF");
+
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const response = await fetch("/api/papers/preview", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || `PDF preview failed（HTTP ${response.status}）`);
+      }
+      if (paperPreviewAbortRef.current !== controller) return;
+      setAnalysisData({ mode: "pending", paper: payload.paper });
+      setStreamMessage(`已解析 ${payload.paper?.sections_count ?? 0} 个章节，可以开始正式分析。`);
+      showToast("PDF 信息已解析");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (paperPreviewAbortRef.current !== controller) return;
+      const message = error instanceof Error ? error.message : "无法解析 PDF。";
+      setAnalysisError(message);
+      setStreamMessage(message);
+      showToast("PDF 解析失败");
+    } finally {
+      if (paperPreviewAbortRef.current === controller) {
+        paperPreviewAbortRef.current = null;
+        setPaperPreviewLoading(false);
+      }
+    }
   }
 
   function handleResultSelection() {
@@ -2362,6 +2406,10 @@ export function App() {
       showToast("Select a PDF first");
       return;
     }
+    if (paperPreviewLoading) {
+      showToast("请等待 PDF 信息解析完成");
+      return;
+    }
 
     setActiveTab("概览");
     setIsAnalyzing(true);
@@ -2370,7 +2418,10 @@ export function App() {
     setAgentStates(emptyAgentStates);
     setAgentStreams(emptyAgentStreams);
     setStreamMessage("正在将 PDF 上传到后端..." );
-    setAnalysisData(pendingAnalysisForFile(selectedFile));
+    setAnalysisData((previous) => ({
+      mode: "pending",
+      paper: previous?.paper || pendingAnalysisForFile(selectedFile).paper,
+    }));
     chatAbortRef.current?.abort();
     chatAbortRef.current = null;
     setChatStreaming(false);
@@ -2557,14 +2608,14 @@ export function App() {
             onDrop={(event) => {
               event.preventDefault();
               setDragActive(false);
-              chooseFile(event.dataTransfer.files?.[0]);
+              void chooseFile(event.dataTransfer.files?.[0]);
             }}
           >
             <input
               ref={fileInputRef}
               type="file"
               accept="application/pdf"
-              onChange={(event) => chooseFile(event.target.files?.[0])}
+              onChange={(event) => void chooseFile(event.target.files?.[0])}
             />
             <IconFileDescription size={34} stroke={1.4} />
             <span>Drop a research paper to begin</span>
@@ -2577,17 +2628,24 @@ export function App() {
           <section className="uploaded-card">
             <div className="section-heading">
               <span>Uploaded Paper</span>
-              <small><i /> {displayedData.history_id ? "Saved" : selectedFile ? "Ready" : "Sample"}</small>
+              <small className={paperPreviewLoading ? "parsing" : ""}>
+                <i /> {displayedData.history_id ? "Saved" : paperPreviewLoading ? "Parsing" : selectedFile ? "Ready" : "Sample"}
+              </small>
             </div>
             <div className="paper-card">
               <IconFileTypePdf className="pdf-icon" size={34} stroke={1.6} />
               <div>
                 <h2>{displayedPaper.title}</h2>
-                <p>{displayedPaper.filename || "Sample PDF"}</p>
               </div>
               <div className="paper-stats">
-                <span><IconFileAnalytics size={15} /> {displayedPaper.pages || "—"}<small>Pages</small></span>
-                <span><IconListDetails size={15} /> {displayedPaper.sections_count || "—"}<small>Sections</small></span>
+                <span>
+                  {paperPreviewLoading ? <IconLoader2 className="spin" size={15} /> : <IconFileAnalytics size={15} />}
+                  {paperPreviewLoading ? "…" : displayedPaper.pages ?? "—"}<small>Pages</small>
+                </span>
+                <span>
+                  {paperPreviewLoading ? <IconLoader2 className="spin" size={15} /> : <IconListDetails size={15} />}
+                  {paperPreviewLoading ? "…" : displayedPaper.sections_count ?? "—"}<small>Sections</small>
+                </span>
                 <span><IconCloudUpload size={15} /> {formatBytes(displayedPaper.size_bytes)}<small>File Size</small></span>
               </div>
             </div>
@@ -2687,9 +2745,9 @@ export function App() {
             <IconClock size={16} stroke={1.8} />
             <span>{workflowDetail}</span>
           </div>
-          <AppButton className="analyze-button" onClick={startAnalysis} disabled={isAnalyzing}>
-            {isAnalyzing ? <IconLoader2 className="spin" size={20} /> : <IconSparkles size={20} />}
-            {isAnalyzing ? "Analyzing Paper" : "Analyze Paper"}
+          <AppButton className="analyze-button" onClick={startAnalysis} disabled={isAnalyzing || paperPreviewLoading}>
+            {isAnalyzing || paperPreviewLoading ? <IconLoader2 className="spin" size={20} /> : <IconSparkles size={20} />}
+            {paperPreviewLoading ? "Parsing PDF" : isAnalyzing ? "Analyzing Paper" : "Analyze Paper"}
           </AppButton>
         </section>
 

@@ -213,6 +213,43 @@ def _extract_blocks_with_fontsize(doc: fitz.Document) -> List[Tuple[int, str, fl
     return rows
 
 
+def _infer_title_from_first_page(doc: fitz.Document) -> str:
+    """Infer a missing PDF title from the most prominent first-page text block."""
+    if doc.page_count < 1:
+        return ""
+    page = doc[0]
+    page_height = max(float(page.rect.height), 1.0)
+    candidates: list[tuple[float, float, str]] = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        y0 = float(block.get("bbox", (0, page_height, 0, page_height))[1])
+        if y0 > page_height * 0.45:
+            continue
+        lines: list[str] = []
+        sizes: list[float] = []
+        for line in block.get("lines", []):
+            text = "".join(span.get("text", "") for span in line.get("spans", []))
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                lines.append(text)
+            sizes.extend(
+                float(span.get("size", 0))
+                for span in line.get("spans", [])
+                if str(span.get("text", "")).strip()
+            )
+        candidate = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        if not sizes or not 8 <= len(candidate) <= 300:
+            continue
+        normalized = candidate.lower().strip(" .:-")
+        if normalized.startswith(("abstract", "keywords", "arxiv", "doi:")):
+            continue
+        if len(re.findall(r"[A-Za-z\u4e00-\u9fff]", candidate)) < 5:
+            continue
+        candidates.append((max(sizes), -y0, candidate))
+    return max(candidates, default=(0.0, 0.0, ""))[2]
+
+
 def _detect_body_fontsize(rows: List[Tuple[int, str, float]]) -> float:
     """Estimate the dominant body font size via median."""
     sizes = [sz for _, txt, sz in rows if txt.strip()]
@@ -462,7 +499,13 @@ def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
     doc = fitz.open(str(pdf_path))
 
     meta = doc.metadata or {}
-    paper_title = meta.get("title", "").strip() or pdf_path.stem
+    metadata_title = re.sub(r"\s+", " ", meta.get("title", "")).strip()
+    normalized_metadata_title = metadata_title.lower().strip(" .:-")
+    generic_titles = {"", "paper", "document", "untitled", pdf_path.stem.lower()}
+    if normalized_metadata_title in generic_titles or normalized_metadata_title.startswith("microsoft word"):
+        paper_title = _infer_title_from_first_page(doc) or pdf_path.stem
+    else:
+        paper_title = metadata_title
     toc = doc.get_toc(simple=True)
 
     # Plain text per page (for regex fallback and full_text)

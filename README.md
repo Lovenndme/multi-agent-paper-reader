@@ -13,6 +13,7 @@ The repository includes a full-stack web app:
 - Backend: `app.py` with FastAPI
 - Frontend: `frontend-prototype/` with React + Vite
 - API: `POST /api/analyze` accepts a PDF upload and returns parsed paper metadata plus all agent outputs
+- Preview API: `POST /api/papers/preview` immediately returns the paper title, page count, section count, and original section list without model calls or history writes
 - Streaming API: `POST /api/analyze/stream` returns newline-delimited JSON events for parsing, evidence indexing, token-level model output, agent completion, and final synthesis
 - Follow-up API: `POST /api/chat/stream` combines recent turns, a compact long-term memory index, query-relevant topic memories, recalled older messages, and full-text paper evidence
 - Conversation API: `GET/POST /api/history/{id}/conversations` plus `GET/PATCH/DELETE /api/chat/conversations/{id}` support multiple persistent chats per paper

@@ -1,9 +1,12 @@
 """Smoke tests for the PDF parser (no LLM calls required)."""
 
 import textwrap
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import fitz
 
 from core.pdf_parser import (
     ParsedPaper,
@@ -11,6 +14,7 @@ from core.pdf_parser import (
     _looks_like_font_header,
     _matches_header_pattern,
     _normalize_title,
+    parse_pdf,
 )
 
 
@@ -59,6 +63,24 @@ class TestFontHeaderHeuristic(unittest.TestCase):
         self.assertFalse(_looks_like_font_header("(ESML): A Deep Learning Framework on"))
         self.assertFalse(_looks_like_font_header("="))
         self.assertFalse(_looks_like_font_header("mn) �→∑"))
+
+
+class TestPaperTitleInference(unittest.TestCase):
+    def test_uses_prominent_first_page_title_when_metadata_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "renamed-local-file.pdf"
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_text((72, 100), "A Reliable Paper Title", fontsize=20)
+            page.insert_text((72, 140), "First Author, Second Author", fontsize=10)
+            page.insert_text((72, 200), "Abstract", fontsize=13)
+            page.insert_text((72, 225), "This paper contains enough body text for parsing.", fontsize=10)
+            document.save(path)
+            document.close()
+
+            parsed = parse_pdf(path)
+
+        self.assertEqual(parsed.title, "A Reliable Paper Title")
 
 
 class TestParsedPaperSectionRouting(unittest.TestCase):
