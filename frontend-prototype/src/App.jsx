@@ -1198,7 +1198,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.3.1"}</strong>
+                <strong>{status.version || "V1.3.2"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1652,7 +1652,6 @@ export function App() {
 
   function openApplicationSettings() {
     setHistoryOpen(false);
-    setWorkspaceMenuOpen(false);
     setSettingsApiKey("");
     setSettingsBaseUrl("");
     setSettingsApiKeyVisible(false);
