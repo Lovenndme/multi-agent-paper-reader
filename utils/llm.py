@@ -19,8 +19,10 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 from core.model_providers import (
-    model_mode_request_body,
     model_display_label,
+    model_is_known,
+    model_mode_request_body,
+    model_modes,
     provider_api_key,
     provider_base_url,
     provider_label,
@@ -103,6 +105,33 @@ def get_chat_llm():
     )
 
 
+@lru_cache(maxsize=32)
+def get_chat_llm_for_route(provider_id: str, model: str, mode: str = ""):
+    """Build a paper-QA client for one validated, request-scoped route."""
+    spec = provider_spec(provider_id)
+    api_key = get_api_key(provider_id)
+    if not api_key:
+        raise EnvironmentError(_missing_key_message(provider_id))
+    if not model_is_known(provider_id, "text", model):
+        raise ValueError(f"{spec.label} 不支持文本模型 {model}。")
+
+    available_modes = model_modes(provider_id, model)
+    if mode and not any(item.id == mode for item in available_modes):
+        raise ValueError(f"{model} 不支持响应模式 {mode}。")
+    effective_mode = mode or (available_modes[0].id if available_modes else "")
+    return _build_chat_model(
+        **_client_kwargs(
+            provider_id=provider_id,
+            model=model,
+            api_key=api_key,
+            temperature=float(os.environ.get("CHAT_TEMPERATURE", "0.25")),
+            timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
+            max_retries=3,
+            mode=effective_mode,
+        )
+    )
+
+
 @lru_cache(maxsize=1)
 def get_vision_llm():
     """Return a cached vision client using the selected provider protocol."""
@@ -142,6 +171,7 @@ def _client_kwargs(
     temperature: float,
     timeout: float,
     max_retries: int,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "provider_id": provider_id,
@@ -152,8 +182,8 @@ def _client_kwargs(
         "timeout": timeout,
         "max_retries": max_retries,
     }
-    mode = selected_text_mode() if provider_id == text_provider_id() else ""
-    mode_body = model_mode_request_body(provider_id, model, mode) if mode else {}
+    effective_mode = selected_text_mode() if mode is None and provider_id == text_provider_id() else (mode or "")
+    mode_body = model_mode_request_body(provider_id, model, effective_mode) if effective_mode else {}
     if mode_body:
         kwargs["extra_body"] = mode_body
     # GPT-5, current Claude adaptive-thinking models, Kimi K2.6 and DeepSeek V4
@@ -197,12 +227,13 @@ def reset_llm_clients() -> None:
     """Discard cached clients after runtime credentials change."""
     get_llm.cache_clear()
     get_chat_llm.cache_clear()
+    get_chat_llm_for_route.cache_clear()
     get_vision_llm.cache_clear()
 
 
-def start_text_model_call_trace(llm: Any) -> dict[str, Any]:
+def start_text_model_call_trace(llm: Any, provider_id: str | None = None) -> dict[str, Any]:
     """Snapshot the actual cached client used for one text-model request."""
-    provider_id = text_provider_id()
+    provider_id = provider_id or text_provider_id()
     requested_model = str(
         getattr(llm, "model_name", "")
         or getattr(llm, "model", "")

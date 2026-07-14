@@ -27,6 +27,7 @@ from core.chat import (
     PaperChatRequest,
     build_chat_prompt,
     demo_chat_reply,
+    hide_evidence_citations,
     store_analysis_session,
     stream_chat_reply,
 )
@@ -741,11 +742,12 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 answer_chunks.append(token)
                 yield _stream_event("token", text=token)
 
-        if conversation_id and answer_chunks:
+        visible_answer = hide_evidence_citations("".join(answer_chunks))
+        if conversation_id and visible_answer:
             assistant_message = add_conversation_message(
                 conversation_id,
                 role="assistant",
-                content="".join(answer_chunks),
+                content=visible_answer,
                 model_trace=model_trace,
             )
             memory_refresh_scheduled = schedule_memory_refresh(conversation_id)

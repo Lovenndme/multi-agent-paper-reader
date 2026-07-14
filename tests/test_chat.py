@@ -17,7 +17,9 @@ from core.chat import (
     compact_analysis_context,
     demo_chat_reply,
     get_analysis_session,
+    hide_evidence_citations,
     estimate_chat_tokens,
+    resolve_chat_model_route,
     retrieve_chat_evidence,
     store_analysis_session,
 )
@@ -51,6 +53,7 @@ class TestPaperChat(unittest.TestCase):
         self.assertIn("RAG", messages[0].content)
         self.assertNotIn("must not enter prompt", messages[0].content)
         self.assertIn("不要把长公式或推导塞进表格", messages[0].content)
+        self.assertIn("最终回答不要显示 E 编号", messages[0].content)
         self.assertIn("<selected_excerpt>", messages[-1].content)
         self.assertIn("这个结论为什么成立", messages[-1].content)
 
@@ -88,6 +91,29 @@ class TestPaperChat(unittest.TestCase):
 
         self.assertIn("一段需要解释的论文结论", reply)
         self.assertIn("Qwen / Qwen3.7 Max", reply)
+
+    def test_request_scoped_model_route_does_not_follow_global_provider(self):
+        request = PaperChatRequest(
+            question="解释方法",
+            text_provider="qwen",
+            text_model="qwen3.7-plus",
+            text_mode="fast",
+        )
+        with patch.dict(
+            os.environ,
+            {"TEXT_PROVIDER": "zhipu", "MODEL_NAME": "glm-5.2", "MODEL_MODE": "deep"},
+            clear=True,
+        ):
+            route = resolve_chat_model_route(request)
+
+        self.assertEqual(route, ("qwen", "qwen3.7-plus", "fast"))
+
+    def test_hides_internal_evidence_markers_from_visible_answer(self):
+        answer = "结论成立 [E007, p.6]，并得到重复实验支持 [E004, p.5]。\n\n[E009, pp.7-8]"
+
+        cleaned = hide_evidence_citations(answer)
+
+        self.assertEqual(cleaned, "结论成立，并得到重复实验支持。")
 
     def test_prompt_treats_server_call_details_as_model_identity_source(self):
         request = PaperChatRequest(

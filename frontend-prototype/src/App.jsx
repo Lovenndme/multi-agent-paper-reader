@@ -822,6 +822,14 @@ function analysisContextForChat(data) {
   }, {});
 }
 
+function visibleChatContent(content = "") {
+  return content
+    .replace(/[ \t]*\[(?:E\d{3,}(?:\s*,\s*p{1,2}\.\s*\d+(?:\s*[-–—]\s*\d+)?)?)(?:\s*[,;，；]\s*E\d{3,}(?:\s*,\s*p{1,2}\.\s*\d+(?:\s*[-–—]\s*\d+)?)?)*\]/gi, "")
+    .replace(/[ \t]+([，。！？；：,.!?;:])/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function PaperChatDrawer({
   paperTitle,
   modelLabel = "论文研究助手",
@@ -832,6 +840,8 @@ function PaperChatDrawer({
   quote,
   isStreaming,
   isConversationLoading,
+  modelProviders,
+  chatRoute,
   onInputChange,
   onClearQuote,
   onSend,
@@ -840,10 +850,12 @@ function PaperChatDrawer({
   onNewConversation,
   onDeleteConversation,
   onRenameConversation,
+  onChatRouteChange,
 }) {
   const textareaRef = useRef(null);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState("");
   const {
     width: drawerWidth,
     minWidth: drawerMinWidth,
@@ -854,6 +866,17 @@ function PaperChatDrawer({
     handleResizeKeyDown,
   } = useResizableChatDrawer();
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+  const configuredProviders = (modelProviders || []).filter(
+    (provider) => provider.configured && provider.text_models?.length,
+  );
+  const selectedProvider = configuredProviders.find((provider) => provider.id === chatRoute.text_provider)
+    || configuredProviders[0];
+  const selectedModel = selectedProvider?.text_models?.find((model) => model.id === chatRoute.text_model)
+    || selectedProvider?.text_models?.[0];
+  const selectedModes = selectedModel?.modes || [];
+  const selectedRouteValue = selectedProvider && selectedModel
+    ? `${selectedProvider.id}::${selectedModel.id}`
+    : "";
   const {
     containerRef: messagesContainerRef,
     autoFollow,
@@ -893,6 +916,26 @@ function PaperChatDrawer({
       setRenameValue(activeConversation?.title || "");
       setIsRenaming(false);
     }
+  }
+
+  async function copyAssistantMessage(message) {
+    const content = visibleChatContent(message.content);
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      const fallback = document.createElement("textarea");
+      fallback.value = content;
+      fallback.setAttribute("readonly", "");
+      fallback.style.position = "fixed";
+      fallback.style.opacity = "0";
+      document.body.appendChild(fallback);
+      fallback.select();
+      document.execCommand("copy");
+      fallback.remove();
+    }
+    setCopiedMessageId(message.id);
+    window.setTimeout(() => setCopiedMessageId((current) => (current === message.id ? "" : current)), 1600);
   }
 
   return (
@@ -984,7 +1027,7 @@ function PaperChatDrawer({
               <option value="">新对话</option>
               {conversations.map((conversation) => (
                 <option value={conversation.id} key={conversation.id}>
-                  {conversation.title}（{conversation.message_count}）
+                  {conversation.title}
                 </option>
               ))}
             </select>
@@ -1026,25 +1069,41 @@ function PaperChatDrawer({
             <strong>{modelLabel}</strong>
           </div>
         )}
-        {messages.map((message) => (
+        {messages.map((message) => {
+          const visibleContent = visibleChatContent(message.content);
+          return (
           <article className={`chat-message ${message.role}${message.error ? " error" : ""}`} key={message.id}>
             {message.quote && (
               <blockquote><IconQuote size={14} stroke={1.8} /> {message.quote}</blockquote>
             )}
-            {message.content ? (
+            {visibleContent ? (
               message.role === "assistant" ? (
-                <Suspense fallback={<p>{message.content}</p>}>
-                  <ChatMarkdown>{message.content}</ChatMarkdown>
+                <Suspense fallback={<p>{visibleContent}</p>}>
+                  <ChatMarkdown>{visibleContent}</ChatMarkdown>
                 </Suspense>
               ) : (
-                <p>{message.content}</p>
+                <p>{visibleContent}</p>
               )
             ) : (
               <span className="chat-typing" aria-label="正在生成"><i /><i /><i /></span>
             )}
+            {message.role === "assistant" && visibleContent && !message.error && (
+              <div className="chat-message-actions">
+                <button
+                  type="button"
+                  title={copiedMessageId === message.id ? "已复制" : "复制回答"}
+                  aria-label={copiedMessageId === message.id ? "回答已复制" : "复制回答"}
+                  onClick={() => void copyAssistantMessage(message)}
+                >
+                  {copiedMessageId === message.id ? <IconCheck size={15} stroke={2} /> : <IconCopy size={15} stroke={1.8} />}
+                  <span>{copiedMessageId === message.id ? "已复制" : "复制"}</span>
+                </button>
+              </div>
+            )}
             {message.role === "assistant" && <ModelCallTrace trace={message.model_trace} />}
           </article>
-        ))}
+          );
+        })}
       </div>
 
       {!autoFollow && (
@@ -1077,9 +1136,47 @@ function PaperChatDrawer({
             onChange={(event) => onInputChange(event.target.value)}
             onKeyDown={handleKeyDown}
           />
-          <button className="chat-send" type="submit" aria-label="发送问题" disabled={!input.trim() || isStreaming}>
-            {isStreaming ? <IconLoader2 className="spin" size={18} /> : <IconSend size={18} stroke={1.9} />}
-          </button>
+          <div className="chat-composer-toolbar">
+            <div className="chat-route-controls">
+              <select
+                aria-label="选择追问模型"
+                title="选择本次追问使用的模型"
+                value={selectedRouteValue}
+                disabled={isStreaming || !configuredProviders.length}
+                onChange={(event) => {
+                  const [providerId, modelId] = event.target.value.split("::");
+                  const provider = configuredProviders.find((item) => item.id === providerId);
+                  const model = provider?.text_models?.find((item) => item.id === modelId);
+                  onChatRouteChange({
+                    text_provider: providerId,
+                    text_model: modelId,
+                    text_mode: model?.default_mode || "",
+                  });
+                }}
+              >
+                {configuredProviders.flatMap((provider) => provider.text_models.map((model) => (
+                  <option value={`${provider.id}::${model.id}`} key={`${provider.id}:${model.id}`}>
+                    {model.label}
+                  </option>
+                )))}
+              </select>
+              <select
+                aria-label="选择响应模式"
+                title="选择本次追问的响应模式"
+                value={chatRoute.text_mode || selectedModel?.default_mode || ""}
+                disabled={isStreaming || !selectedModes.length}
+                onChange={(event) => onChatRouteChange({ ...chatRoute, text_mode: event.target.value })}
+              >
+                {!selectedModes.length && <option value="">默认模式</option>}
+                {selectedModes.map((mode) => (
+                  <option value={mode.id} key={mode.id}>{mode.label}</option>
+                ))}
+              </select>
+            </div>
+            <button className="chat-send" type="submit" aria-label="发送问题" disabled={!input.trim() || isStreaming}>
+              {isStreaming ? <IconLoader2 className="spin" size={18} /> : <IconSend size={18} stroke={1.9} />}
+            </button>
+          </div>
         </div>
       </form>
     </section>
@@ -1167,7 +1264,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.2.2"}</strong>
+                <strong>{status.version || "V1.3.0"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1460,6 +1557,11 @@ export function App() {
   const [chatConversations, setChatConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [chatConversationLoading, setChatConversationLoading] = useState(false);
+  const [chatRoute, setChatRoute] = useState({
+    text_provider: defaultSettingsRouting.text_provider,
+    text_model: defaultSettingsRouting.text_model,
+    text_mode: defaultSettingsRouting.text_mode,
+  });
   const [historyItems, setHistoryItems] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
@@ -1613,6 +1715,13 @@ export function App() {
         vision_enabled: Boolean(visionRoute?.enabled && initialCredential?.supports_vision),
         vision_provider: textRoute?.provider || "zhipu",
         vision_model: initialCredential?.default_vision_model || "",
+      });
+      setChatRoute({
+        text_provider: textRoute?.provider || "zhipu",
+        text_model: textRoute?.model || "glm-5.2",
+        text_mode: textRoute?.mode
+          || initialCredential?.text_models?.find((model) => model.id === textRoute?.model)?.default_mode
+          || "",
       });
       setSettingsCredentialProvider(initialCredentialProvider);
       setSettingsBaseUrl(initialCredential?.base_url || "");
@@ -2150,6 +2259,9 @@ export function App() {
           history_id: displayedData.history_id || null,
           conversation_id: activeConversationId || null,
           selected_text: quote || null,
+          text_provider: chatRoute.text_provider,
+          text_model: chatRoute.text_model,
+          text_mode: chatRoute.text_mode || null,
           context: analysisContextForChat(displayedData),
         }),
       });
@@ -2797,6 +2909,8 @@ export function App() {
               quote={chatQuote}
               isStreaming={chatStreaming}
               isConversationLoading={chatConversationLoading}
+              modelProviders={settingsStatus?.providers || []}
+              chatRoute={chatRoute}
               onInputChange={setChatInput}
               onClearQuote={() => setChatQuote("")}
               onSend={sendChatMessage}
@@ -2805,6 +2919,7 @@ export function App() {
               onNewConversation={startNewChatConversation}
               onDeleteConversation={deleteActiveChatConversation}
               onRenameConversation={renameActiveChatConversation}
+              onChatRouteChange={setChatRoute}
             />
           )}
         </section>

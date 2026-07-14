@@ -11,6 +11,7 @@ from utils.llm import (
     get_api_key,
     get_base_url,
     get_chat_llm,
+    get_chat_llm_for_route,
     get_llm,
     get_vision_llm,
     invoke_vision_image_summary,
@@ -59,6 +60,7 @@ class TestStructuredOutputParsing(unittest.TestCase):
     def tearDown(self):
         get_llm.cache_clear()
         get_chat_llm.cache_clear()
+        get_chat_llm_for_route.cache_clear()
         get_vision_llm.cache_clear()
 
     def test_chat_model_uses_separate_low_temperature(self):
@@ -232,6 +234,28 @@ class TestStructuredOutputParsing(unittest.TestCase):
             get_llm()
 
         self.assertEqual(client_class.call_args.kwargs["extra_body"], {"enable_thinking": False})
+
+    def test_request_scoped_qwen_route_uses_selected_model_and_mode(self):
+        get_chat_llm_for_route.cache_clear()
+        fake_client = SimpleNamespace(model_name="qwen3.7-plus")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TEXT_PROVIDER": "zhipu",
+                    "GLM_API_KEY": "glm-test-key",
+                    "DASHSCOPE_API_KEY": "qwen-test-key",
+                },
+                clear=True,
+            ),
+            patch("utils.llm.ChatOpenAI", return_value=fake_client) as client_class,
+        ):
+            llm = get_chat_llm_for_route("qwen", "qwen3.7-plus", "thinking")
+
+        self.assertIs(llm, fake_client)
+        kwargs = client_class.call_args.kwargs
+        self.assertEqual(kwargs["model"], "qwen3.7-plus")
+        self.assertEqual(kwargs["extra_body"], {"enable_thinking": True})
 
     def test_anthropic_vision_uses_native_base64_image_block(self):
         response = AIMessage(content="图表摘要")

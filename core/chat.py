@@ -23,9 +23,18 @@ from core.external_knowledge import (
     format_external_sources,
     search_external_academic_sources,
 )
-from core.model_providers import active_text_model_identity
+from core.model_providers import (
+    active_text_model_identity,
+    model_display_label,
+    model_modes,
+    provider_label,
+    provider_spec,
+    selected_text_mode,
+    selected_text_model,
+    text_provider_id,
+)
 from utils.llm import (
-    get_chat_llm,
+    get_chat_llm_for_route,
     invoke_with_retry,
     start_text_model_call_trace,
     update_text_model_call_trace,
@@ -125,6 +134,9 @@ class PaperChatRequest(BaseModel):
     history_id: str | None = Field(default=None, max_length=80)
     conversation_id: str | None = Field(default=None, max_length=80)
     selected_text: str | None = Field(default=None, max_length=4_000)
+    text_provider: str | None = Field(default=None, max_length=32)
+    text_model: str | None = Field(default=None, max_length=128)
+    text_mode: str | None = Field(default=None, max_length=32)
     history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=32)
     context: dict[str, Any] = Field(default_factory=dict)
 
@@ -317,7 +329,7 @@ def build_chat_prompt(request: PaperChatRequest) -> ChatPrompt:
         "</source_policy>\n\n"
         "<answer_rules>\n"
         "- 先直接回答，再根据问题复杂度解释依据；不要先复述问题。\n"
-        "- 陈述本文事实或数字时，紧邻标注证据 ID 与页码，例如 [E003, p.4]。\n"
+        "- 在内部逐项核对证据 ID 与页码，但最终回答不要显示 E 编号、页码标签或证据清单。\n"
         "- 引用外部摘要时标注 [S1] 并给出资料中的 URL，不得声称已阅读其全文。\n"
         "- 超出本文的常识明确标注“背景知识”；你的归纳明确标注“推断”。\n"
         "- 证据不足或相互矛盾时，明确说出缺少什么，不要补造数字、引文、页码或结论。\n"
@@ -590,6 +602,40 @@ def _format_recalled_messages(messages: tuple[dict[str, Any], ...]) -> str:
     )
 
 
+_VISIBLE_EVIDENCE_MARKER = re.compile(
+    r"[ \t]*\[(?:E\d{3,}(?:\s*,\s*p{1,2}\.\s*\d+(?:\s*[-–—]\s*\d+)?)?)"
+    r"(?:\s*[,;，；]\s*E\d{3,}(?:\s*,\s*p{1,2}\.\s*\d+(?:\s*[-–—]\s*\d+)?)?)*\]",
+    flags=re.IGNORECASE,
+)
+
+
+def hide_evidence_citations(text: str) -> str:
+    """Remove internal paper-evidence markers from user-visible answers."""
+    cleaned = _VISIBLE_EVIDENCE_MARKER.sub("", text)
+    cleaned = re.sub(r"[ \t]+([，。！？；：,.!?;:])", r"\1", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def resolve_chat_model_route(request: PaperChatRequest) -> tuple[str, str, str]:
+    """Resolve a request-scoped chat route without changing global Settings."""
+    global_provider = text_provider_id()
+    provider_id = (request.text_provider or global_provider).strip()
+    spec = provider_spec(provider_id)
+    model = (request.text_model or "").strip()
+    if not model:
+        model = selected_text_model() if provider_id == global_provider else spec.default_text_model
+
+    available_modes = model_modes(provider_id, model)
+    requested_mode = (request.text_mode or "").strip().lower()
+    if requested_mode:
+        mode = requested_mode
+    elif provider_id == global_provider and model == selected_text_model():
+        mode = selected_text_mode()
+    else:
+        mode = available_modes[0].id if available_modes else ""
+    return provider_id, model, mode
+
+
 def stream_chat_reply(
     request: PaperChatRequest,
     *,
@@ -598,10 +644,11 @@ def stream_chat_reply(
 ) -> Iterator[str]:
     """Stream an answer, falling back to one non-streaming call if needed."""
     model_messages = list(messages) if messages is not None else build_chat_messages(request)
-    llm = get_chat_llm()
+    provider_id, model, mode = resolve_chat_model_route(request)
+    llm = get_chat_llm_for_route(provider_id, model, mode)
     runtime_trace = trace if trace is not None else {}
     runtime_trace.clear()
-    runtime_trace.update(start_text_model_call_trace(llm))
+    runtime_trace.update(start_text_model_call_trace(llm, provider_id))
     emitted = False
     try:
         for chunk in llm.stream(model_messages):
@@ -626,7 +673,11 @@ def stream_chat_reply(
 
 def demo_chat_reply(request: PaperChatRequest) -> str:
     """Return a deterministic response for sample and Demo-mode UI verification."""
-    model_identity = active_text_model_identity()
+    if request.text_provider or request.text_model:
+        provider_id, model, _mode = resolve_chat_model_route(request)
+        model_identity = f"{provider_label(provider_id)} / {model_display_label(provider_id, 'text', model)}"
+    else:
+        model_identity = active_text_model_identity()
     if request.selected_text:
         excerpt = " ".join(request.selected_text.split())[:120]
         return (
