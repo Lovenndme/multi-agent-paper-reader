@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlertCircle,
   IconArrowDown,
+  IconArrowsExchange,
   IconBook2,
   IconBrain,
   IconChartBar,
@@ -12,7 +13,6 @@ import {
   IconCloudUpload,
   IconCopy,
   IconCpu,
-  IconDownload,
   IconExternalLink,
   IconEye,
   IconEyeOff,
@@ -24,7 +24,6 @@ import {
   IconKey,
   IconListDetails,
   IconLoader2,
-  IconMarkdown,
   IconMessageCircle,
   IconPencil,
   IconPlus,
@@ -304,83 +303,6 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-const chapterTitleMap = {
-  abstract: "摘要",
-  introduction: "引言",
-  "related work": "相关工作",
-  background: "研究背景",
-  "research background": "研究背景",
-  motivation: "研究动机",
-  preliminaries: "预备知识",
-  "problem formulation": "问题定义",
-  method: "方法",
-  methodology: "方法",
-  model: "模型",
-  "retrieval model": "检索模型",
-  approach: "方法",
-  framework: "框架",
-  architecture: "模型架构",
-  "model architecture": "模型架构",
-  generator: "生成器",
-  "encoder and decoder stacks": "编码器与解码器堆栈",
-  attention: "注意力机制",
-  "scaled dot-product attention": "缩放点积注意力",
-  "multi-head attention": "多头注意力",
-  "applications of attention in our model": "注意力在模型中的应用",
-  "position-wise feed-forward networks": "逐位置前馈网络",
-  "embeddings and softmax": "词嵌入与 Softmax",
-  "positional encoding": "位置编码",
-  "why self-attention": "为什么使用自注意力",
-  experiments: "实验",
-  experiment: "实验",
-  "experimental setup": "实验设置",
-  "experimental results": "实验结果",
-  "implementation details": "实现细节",
-  "hyperparameter settings": "超参数设置",
-  "comparison with state-of-the-art": "与先进方法对比",
-  ablations: "消融实验",
-  ablation: "消融实验",
-  evaluation: "评估",
-  results: "实验结果",
-  training: "训练",
-  "training data and batching": "训练数据与批处理",
-  "hardware and schedule": "硬件与训练计划",
-  optimizer: "优化器",
-  regularization: "正则化",
-  "label smoothing": "标签平滑",
-  "machine translation": "机器翻译",
-  "model variations": "模型变体",
-  "english constituency parsing": "英语成分句法分析",
-  discussion: "讨论",
-  analysis: "分析",
-  limitations: "局限性",
-  "future work": "未来工作",
-  conclusion: "结论",
-  conclusions: "结论",
-  acknowledgments: "致谢",
-  acknowledgements: "致谢",
-  references: "参考文献",
-  "full paper": "全文",
-};
-
-function cleanChapterTitle(chapter, index) {
-  const candidate = chapter?.display_title || chapter?.title || "";
-  const compact = String(candidate).replace(/\s+/g, " ").trim();
-  const stripped = compact.replace(/^[\d一二三四五六七八九十]+(?:[\.\d]*)[\.\、\s]+/, "");
-  const normalized = stripped.toLowerCase().replace(/[.:：-]+$/g, "").trim();
-
-  if (chapterTitleMap[normalized]) return chapterTitleMap[normalized];
-  if (normalized.startsWith("appendix")) return "附录";
-  if (!stripped || stripped.includes("�")) return `章节 ${index + 1}`;
-
-  const letters = stripped.match(/[A-Za-z\u4e00-\u9fff]/g) || [];
-  const symbols = stripped.match(/[^A-Za-z0-9\u4e00-\u9fff\s.\-:/&]/g) || [];
-  if (letters.length < 2 || symbols.length / Math.max(stripped.length, 1) > 0.16) {
-    return `章节 ${index + 1}`;
-  }
-
-  return stripped.length > 48 ? `${stripped.slice(0, 45).trim()}...` : stripped;
-}
 
 function chapterMeta(chapter) {
   const start = Number.isFinite(chapter?.page_start) ? chapter.page_start + 1 : null;
@@ -388,6 +310,18 @@ function chapterMeta(chapter) {
   const pageText = start ? (end && end !== start ? `第 ${start}-${end} 页` : `第 ${start} 页`) : "页码待确认";
   const chars = Number.isFinite(chapter?.chars) ? `约 ${Math.max(Math.round(chapter.chars / 100) * 100, 100)} 字` : "内容已识别";
   return `${pageText} · ${chars}`;
+}
+
+function originalChapterTitle(chapter, index) {
+  const compact = String(chapter?.title || chapter?.display_title || "").replace(/\s+/g, " ").trim();
+  if (!compact || compact.includes("�")) return `章节 ${index + 1}`;
+
+  const letters = compact.match(/[A-Za-z\u4e00-\u9fff]/g) || [];
+  const symbols = compact.match(/[^A-Za-z0-9\u4e00-\u9fff\s.\-:/&]/g) || [];
+  if (letters.length < 2 || symbols.length / Math.max(compact.length, 1) > 0.16) {
+    return `章节 ${index + 1}`;
+  }
+  return compact;
 }
 
 const chapterAgentKeywords = {
@@ -1264,7 +1198,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.3.0"}</strong>
+                <strong>{status.version || "V1.3.1"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
@@ -1517,7 +1451,6 @@ function SettingsDialog({
 
 export function App() {
   const [workspaceMode, setWorkspaceMode] = useState("reading");
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [comparisonData, setComparisonData] = useState(null);
   const [activeTab, setActiveTab] = useState("概览");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -1570,7 +1503,6 @@ export function App() {
   const resultsPanelRef = useRef(null);
   const resultsScrollRef = useRef(null);
   const chatAbortRef = useRef(null);
-  const workspaceMenuRef = useRef(null);
 
   useEffect(() => {
     void loadPaperHistory();
@@ -1587,21 +1519,6 @@ export function App() {
     return () => document.removeEventListener("keydown", closeSettingsWithKeyboard);
   }, [settingsOpen, settingsSaving]);
 
-  useEffect(() => {
-    function closeWorkspaceMenu(event) {
-      if (!workspaceMenuRef.current?.contains(event.target)) setWorkspaceMenuOpen(false);
-    }
-    function closeWorkspaceMenuWithKeyboard(event) {
-      if (event.key === "Escape") setWorkspaceMenuOpen(false);
-    }
-    document.addEventListener("pointerdown", closeWorkspaceMenu);
-    document.addEventListener("keydown", closeWorkspaceMenuWithKeyboard);
-    return () => {
-      document.removeEventListener("pointerdown", closeWorkspaceMenu);
-      document.removeEventListener("keydown", closeWorkspaceMenuWithKeyboard);
-    };
-  }, []);
-
   const displayedData = analysisData || sampleAnalysis;
   const displayedPaper = displayedData.paper;
   const activeModelLabel = settingsStatus?.routing?.text?.model_label
@@ -1613,9 +1530,6 @@ export function App() {
       displayedData.critic_output &&
       displayedData.summary_output,
   );
-  const hasExportData = workspaceMode === "comparison"
-    ? Boolean(comparisonData?.comparison)
-    : hasFinalAnalysis;
   const sourceSections = displayedPaper.sections?.length
     ? displayedPaper.sections
     : selectedFile
@@ -1676,7 +1590,7 @@ export function App() {
   const hasParsedSections = Boolean(displayedPaper.sections?.length);
   const displaySections = sourceSections.map((chapter, index) => ({
         ...chapter,
-        displayTitle: cleanChapterTitle(chapter, index),
+        displayTitle: originalChapterTitle(chapter, index),
         meta: selectedFile && !hasParsedSections ? "点击 Analyze Paper 后自动识别章节" : chapterMeta(chapter),
         status: chapterStatus(chapter, {
           selectedFile,
@@ -2368,21 +2282,6 @@ export function App() {
       return "";
     }
 
-    if (event.type === "section_titles_started") {
-      setStreamMessage(`正在将 ${event.count ?? "若干"} 个英文章节标题统一翻译为中文。`);
-      return "";
-    }
-
-    if (event.type === "section_titles_complete") {
-      setStreamMessage(`已翻译 ${event.translated ?? 0} 个自定义章节标题，正在整理论文结构。`);
-      return "";
-    }
-
-    if (event.type === "section_titles_error") {
-      setStreamMessage("部分自定义章节标题翻译失败，已继续使用本地中文词典处理。" );
-      return "";
-    }
-
     if (event.type === "vision_started") {
       setStreamMessage("正在渲染 PDF 图表并调用视觉模型生成 F 类证据。");
       return "";
@@ -2579,6 +2478,13 @@ export function App() {
     showToast(format === "markdown" ? "Markdown exported" : "Notes downloaded");
   }
 
+  function toggleWorkspace() {
+    const nextMode = workspaceMode === "reading" ? "comparison" : "reading";
+    setWorkspaceMode(nextMode);
+    setHistoryOpen(false);
+    if (nextMode === "comparison" && !historyItems.length) void loadPaperHistory();
+  }
+
   return (
     <div className="app-shell">
       <div className="background-wash" />
@@ -2588,49 +2494,25 @@ export function App() {
           <span className="brand-mark"><IconBook2 size={18} stroke={1.8} /></span>
           <span>Paper Reader</span>
         </div>
-        <div className={`workspace-menu ${workspaceMenuOpen ? "open" : ""}`} ref={workspaceMenuRef}>
-          <button
-            className="workspace-switch"
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded={workspaceMenuOpen}
-            onClick={() => setWorkspaceMenuOpen((value) => !value)}
-          >
-            {workspaceMode === "comparison" ? "Comparison Workspace" : "Reading Workspace"}
-            <IconChevronDown size={16} stroke={1.8} />
-          </button>
-          <div className="workspace-dropdown glass" role="menu">
-            <button
-              className={workspaceMode === "reading" ? "active" : ""}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setWorkspaceMode("reading");
-                setWorkspaceMenuOpen(false);
-                setHistoryOpen(false);
-              }}
-            >
-              <IconBook2 size={17} />
-              <span><strong>单篇论文研读</strong><small>Reading Workspace</small></span>
-              {workspaceMode === "reading" && <IconCheck size={16} />}
-            </button>
-            <button
-              className={workspaceMode === "comparison" ? "active" : ""}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setWorkspaceMode("comparison");
-                setWorkspaceMenuOpen(false);
-                setHistoryOpen(false);
-                if (!historyItems.length) void loadPaperHistory();
-              }}
-            >
-              <IconShare3 size={17} />
-              <span><strong>多论文对比</strong><small>Comparison Workspace</small></span>
-              {workspaceMode === "comparison" && <IconCheck size={16} />}
-            </button>
-          </div>
-        </div>
+        <button
+          className={`workspace-switch ${workspaceMode}`}
+          type="button"
+          onClick={toggleWorkspace}
+          aria-label={workspaceMode === "reading" ? "切换到 Comparison Workspace" : "切换到 Reading Workspace"}
+          title={workspaceMode === "reading" ? "点击切换到多论文对比" : "点击切换到单篇论文研读"}
+        >
+          <span className="workspace-current-icon">
+            {workspaceMode === "reading" ? <IconBook2 size={17} stroke={1.9} /> : <IconShare3 size={17} stroke={1.9} />}
+          </span>
+          <span className="workspace-current-copy">
+            <small>当前</small>
+            <strong>{workspaceMode === "reading" ? "Reading Workspace" : "Comparison Workspace"}</strong>
+          </span>
+          <span className="workspace-switch-cue">
+            <IconArrowsExchange size={15} stroke={1.9} />
+            <span>{workspaceMode === "reading" ? "Comparison" : "Reading"}</span>
+          </span>
+        </button>
         <nav className="top-actions">
           <button
             type="button"
@@ -2641,38 +2523,6 @@ export function App() {
           >
             <IconHistory size={18} stroke={1.8} /> History
           </button>
-          <div className="export-menu">
-            <button
-              className="export-trigger"
-              type="button"
-              aria-haspopup="menu"
-              aria-label="Export options"
-            >
-              <IconShare3 size={18} stroke={1.8} /> Export
-              <IconChevronDown size={14} stroke={1.8} />
-            </button>
-            <div className="export-dropdown glass" role="menu">
-              <button type="button" role="menuitem" onClick={copyJson} disabled={!hasExportData}>
-                <IconCopy size={17} /> 复制 JSON
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => downloadNotes("markdown")}
-                disabled={!hasExportData}
-              >
-                <IconMarkdown size={17} /> 导出 Markdown
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => downloadNotes("json")}
-                disabled={!hasExportData}
-              >
-                <IconDownload size={17} /> 下载笔记
-              </button>
-            </div>
-          </div>
           <button type="button" onClick={openApplicationSettings}>
             <IconSettings size={18} stroke={1.8} /> Settings
           </button>
@@ -2765,7 +2615,7 @@ export function App() {
                 >
                   <span className="chapter-index">{index + 1}</span>
                   <span className="chapter-copy">
-                    <strong>{chapter.displayTitle || cleanChapterTitle(chapter, index)}</strong>
+                    <strong>{chapter.displayTitle || originalChapterTitle(chapter, index)}</strong>
                     <small>{chapter.meta || chapterMeta(chapter)}</small>
                   </span>
                   <span className={`chapter-status ${chapter.status?.tone || "ready"}`}>

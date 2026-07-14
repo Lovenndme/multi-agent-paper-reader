@@ -19,7 +19,7 @@ The repository includes a full-stack web app:
 - Comparison API: `POST /api/comparisons/stream` compares 2-4 saved papers with prefixed evidence, while `/api/comparisons/*` persists comparison workspaces and cross-paper conversations
 - History API: `GET /api/history`, `GET /api/history/{id}`, and `DELETE /api/history/{id}` persist and restore completed analyses
 - Settings API: `GET /api/settings` returns provider, protocol, and active-route metadata without exposing credentials; credential saves must pass a minimal real text-model request over the selected protocol before local persistence
-- Section titles: common headings use a local Chinese dictionary; unknown English headings are translated in one bounded request through the active text model before Live analysis starts
+- Section titles: the chapter list preserves each title in its original parsed language, compacting only abnormal whitespace and falling back to a numbered placeholder for damaged text
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
 Run it locally:

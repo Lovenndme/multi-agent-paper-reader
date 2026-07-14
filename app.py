@@ -95,11 +95,7 @@ from core.model_providers import (
     vision_provider_id,
 )
 from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
-from core.section_titles import (
-    clean_section_title,
-    section_titles_needing_translation,
-    translate_section_titles,
-)
+from core.section_titles import clean_section_title
 from core.settings import (
     PROJECT_VERSION,
     ApiKeySettingsRequest,
@@ -145,12 +141,11 @@ app.add_middleware(
 
 def _section_payload(
     paper: ParsedPaper,
-    translated_titles: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     return [
         {
             "title": section.title,
-            "display_title": clean_section_title(section.title, index, translated_titles),
+            "display_title": clean_section_title(section.title, index),
             "page_start": section.page_start,
             "page_end": section.page_end,
             "chars": len(section.content),
@@ -163,7 +158,6 @@ def _paper_payload(
     paper: ParsedPaper,
     filename: str,
     file_size: int,
-    translated_titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     page_count = max((section.page_end for section in paper.sections), default=-1) + 1
     return {
@@ -172,7 +166,7 @@ def _paper_payload(
         "size_bytes": file_size,
         "pages": page_count,
         "sections_count": len(paper.sections),
-        "sections": _section_payload(paper, translated_titles),
+        "sections": _section_payload(paper),
         "metadata": paper.metadata,
     }
 
@@ -420,7 +414,7 @@ def _stream_demo_analysis(
     file_size: int,
     pdf_data: bytes,
 ) -> Iterable[str]:
-    paper_payload = _paper_payload(paper, filename, file_size, {})
+    paper_payload = _paper_payload(paper, filename, file_size)
     snippets = build_evidence_index(paper)
     index_payload = evidence_payload(snippets)
     outputs = _demo_outputs(paper)
@@ -484,34 +478,7 @@ def _stream_live_analysis(
     pdf_data: bytes,
     pdf_path: Path | None = None,
 ) -> Iterable[str]:
-    raw_titles = [section.title for section in paper.sections]
-    pending_titles = section_titles_needing_translation(raw_titles)
-    translated_titles: dict[str, str] = {}
-    if pending_titles:
-        yield _stream_event(
-            "section_titles_started",
-            count=len(pending_titles),
-            message="Translating section titles",
-        )
-        try:
-            translated_titles = translate_section_titles(raw_titles)
-            yield _stream_event(
-                "section_titles_complete",
-                translated=len(translated_titles),
-                message="Section titles translated",
-            )
-        except Exception as exc:  # noqa: BLE001 - title translation is non-critical
-            yield _stream_event(
-                "section_titles_error",
-                message=f"Section title translation skipped: {exc}",
-            )
-
-    paper_payload = _paper_payload(
-        paper,
-        filename,
-        file_size,
-        translated_titles,
-    )
+    paper_payload = _paper_payload(paper, filename, file_size)
     yield _stream_event("paper", mode="live", paper=paper_payload, message="PDF parsed")
     if pdf_path is not None:
         yield _stream_event(
@@ -1219,7 +1186,6 @@ async def analyze_paper(
         except Exception as exc:  # noqa: BLE001 - preserve useful parser details for UI
             raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
 
-        translated_titles: dict[str, str] = {}
         if demo:
             outputs = _demo_outputs(parsed)
             mode = "demo"
@@ -1230,18 +1196,12 @@ async def analyze_paper(
                     detail=_missing_model_key_message(),
                 )
             try:
-                translated_titles = translate_section_titles(
-                    [section.title for section in parsed.sections]
-                )
-            except Exception:
-                translated_titles = {}
-            try:
                 outputs = _live_outputs(parsed, pdf_path)
             except Exception as exc:  # noqa: BLE001 - return actionable UI error
                 raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
             mode = "live"
 
-    paper_payload = _paper_payload(parsed, filename, len(data), translated_titles)
+    paper_payload = _paper_payload(parsed, filename, len(data))
     snippets = build_evidence_index(parsed)
     index_payload = outputs.get("evidence_index")
     if not isinstance(index_payload, list):
