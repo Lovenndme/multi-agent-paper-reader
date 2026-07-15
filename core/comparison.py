@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from core.evidence import EvidenceSnippet, select_evidence_snippets
 from core.history import load_paper_analysis
+from core.semantic_search import semantic_scores
 from core.schemas import (
     ComparisonAssessment,
     ComparisonCell,
@@ -401,15 +402,22 @@ def _select_query_evidence(
     max_snippets: int,
 ) -> list[EvidenceSnippet]:
     terms = _query_terms(query)
-    if not terms:
+    if not query.strip():
         return []
+    similarities = semantic_scores(
+        query,
+        [f"{snippet.section}\n{snippet.text}" for snippet in snippets],
+    )
     scored: list[tuple[float, int, EvidenceSnippet]] = []
     for index, snippet in enumerate(snippets):
-        haystack = f"{snippet.section} {snippet.text[:1_600]}".lower()
-        score = sum((3.0 if len(term) > 2 else 1.0) * min(haystack.count(term), 4) for term in terms)
+        if similarities is None:
+            haystack = f"{snippet.section} {snippet.text[:1_600]}".lower()
+            score = sum((3.0 if len(term) > 2 else 1.0) * min(haystack.count(term), 4) for term in terms)
+        else:
+            score = similarities[index] * 20.0
         if snippet.kind == "table" and any(term in query.lower() for term in ("实验", "结果", "指标", "性能")):
             score += 8
-        if score > 0:
+        if similarities is not None or score > 0:
             scored.append((score, index, snippet))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return sorted(

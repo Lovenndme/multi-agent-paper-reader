@@ -83,6 +83,7 @@ class TestChatStreamMemory(unittest.TestCase):
         with (
             patch("app.build_chat_prompt", return_value=fake_prompt),
             patch("app.stream_chat_reply", side_effect=fake_stream),
+            patch("app.schedule_memory_refresh", return_value=True),
             patch("app.schedule_conversation_title", return_value=True),
         ):
             events = [json.loads(line) for line in _stream_chat_response(request, demo=False)]

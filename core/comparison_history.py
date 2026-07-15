@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from core.comparison import ComparisonCreateRequest, ComparisonSource
 from core.conversation_titles import generate_conversation_title, local_conversation_title
 from core.history import history_database_connection
+from core.semantic_search import semantic_scores
 
 
 class ComparisonConversationCreateRequest(BaseModel):
@@ -386,7 +387,7 @@ def get_comparison_prompt_memory(
             "SELECT COUNT(*) AS count FROM comparison_chat_messages WHERE conversation_id = ?",
             (conversation_id,),
         ).fetchone()
-    recalled = _rank_messages(old_rows, _memory_terms(query), recalled_limit)
+    recalled = _rank_messages(old_rows, query, recalled_limit)
     return ComparisonPromptMemory(
         recent_messages=tuple(_message_row(row) for row in recent_rows),
         recalled_messages=tuple(_message_row(row) for row in recalled),
@@ -532,14 +533,22 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _rank_messages(rows: list[sqlite3.Row], terms: set[str], limit: int) -> list[sqlite3.Row]:
-    if not terms or limit <= 0:
+def _rank_messages(rows: list[sqlite3.Row], query: str, limit: int) -> list[sqlite3.Row]:
+    if not query.strip() or limit <= 0:
         return []
+    terms = _memory_terms(query)
+    similarities = semantic_scores(
+        query,
+        [f"{row['content']} {row['quote'] or ''}" for row in rows],
+    )
     scored: list[tuple[float, int, sqlite3.Row]] = []
-    for row in rows:
+    for index, row in enumerate(rows):
         text = f"{row['content']} {row['quote'] or ''}".lower()
-        score = sum(min(text.count(term), 4) * (3.0 if len(term) > 2 else 1.0) for term in terms)
-        if score > 0:
+        if similarities is None:
+            score = sum(min(text.count(term), 4) * (3.0 if len(term) > 2 else 1.0) for term in terms)
+        else:
+            score = similarities[index]
+        if similarities is not None or score > 0:
             scored.append((score, int(row["sequence"]), row))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     selected = [item[2] for item in scored[:limit]]

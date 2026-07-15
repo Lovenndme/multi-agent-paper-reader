@@ -566,25 +566,6 @@ def _coerce_top_level_value(value: Any, schema: type[SchemaT]) -> SchemaT | None
     ]
     schema_name = schema.__name__
 
-    if schema_name == "ConversationMemoryDigest":
-        topic_items = [
-            item
-            for item in value
-            if isinstance(item, dict) and item.get("topic") and item.get("content")
-        ]
-        if not topic_items:
-            return None
-        summary = "\n".join(
-            f"- {item['topic']}：{str(item['content'])[:700]}"
-            for item in topic_items
-        )[:5_800]
-        return schema.model_validate(
-            {
-                "summary": summary,
-                "topics": topic_items[:8],
-            }
-        )
-
     if schema_name == "ExperimentOutput":
         return schema.model_validate(
             {

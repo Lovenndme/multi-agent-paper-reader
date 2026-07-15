@@ -1,6 +1,7 @@
 """Tests for evidence-grounded snippet selection."""
 
 import unittest
+from unittest.mock import patch
 
 from core.evidence import build_evidence_index, evidence_context_for_agent
 from core.pdf_parser import FigureBlock, ParsedPaper, Section, TableBlock
@@ -65,6 +66,24 @@ class TestEvidenceIndex(unittest.TestCase):
         self.assertIn("| Ours | 29.8 |", experiment_context)
         self.assertIn("[F001 | figure", method_context)
         self.assertIn("Model architecture overview", method_context)
+
+    def test_agent_selection_uses_semantic_ranker_before_lexical_fallback(self):
+        snippets = build_evidence_index(self._paper(), chunk_chars=120, overlap_chars=10)
+        target_index = next(
+            index for index, snippet in enumerate(snippets) if "WMT14" in snippet.text
+        )
+        scores = [0.01] * len(snippets)
+        scores[target_index] = 0.99
+
+        with patch("core.evidence.semantic_scores", return_value=scores):
+            context = evidence_context_for_agent(
+                snippets,
+                "method",
+                max_chars=120,
+                max_snippets=1,
+            )
+
+        self.assertIn("WMT14", context)
 
 
 if __name__ == "__main__":

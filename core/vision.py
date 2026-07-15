@@ -103,16 +103,18 @@ def render_figure_png(
     *,
     dpi: int | None = None,
 ) -> bytes:
-    """Render one figure region or full page to PNG bytes."""
+    """Render one verified figure region to PNG bytes."""
     if figure.page < 0 or figure.page >= doc.page_count:
         raise ValueError(f"Figure page out of range: {figure.page + 1}")
 
     page = doc[figure.page]
+    if figure.bbox is None:
+        raise ValueError("Figure has no verified layout bounding box; refusing full-page fallback.")
     dpi = dpi or int(os.environ.get("VISION_RENDER_DPI", "144"))
     scale = max(72, dpi) / 72
     matrix = fitz.Matrix(scale, scale)
 
-    clip = _expanded_clip(page, figure.bbox) if figure.bbox else None
+    clip = _expanded_clip(page, figure.bbox)
     pixmap = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
     return pixmap.tobytes("png")
 

@@ -7,6 +7,7 @@ import tempfile
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Iterable
@@ -27,7 +28,9 @@ from core.chat import (
     PaperChatRequest,
     build_chat_prompt,
     demo_chat_reply,
+    estimate_chat_tokens,
     hide_evidence_citations,
+    resolve_chat_model_route,
     store_analysis_session,
     stream_chat_reply,
 )
@@ -37,6 +40,7 @@ from core.chat_memory import (
     add_conversation_message,
     create_conversation,
     delete_conversation,
+    drain_memory_refreshes,
     get_conversation_summary,
     list_conversations,
     load_conversation,
@@ -120,10 +124,17 @@ load_dotenv(
     override=False,
 )
 
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    yield
+    drain_memory_refreshes(timeout=60.0)
+
 app = FastAPI(
     title="Multi-Agent Paper Reader",
     description="Upload a paper PDF and generate structured multi-agent reading notes.",
     version=PROJECT_VERSION,
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -711,13 +722,23 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
 
         visible_answer = hide_evidence_citations("".join(answer_chunks))
         if conversation_id and visible_answer:
+            memory_provider, memory_model, memory_mode = resolve_chat_model_route(effective_request)
             assistant_message = add_conversation_message(
                 conversation_id,
                 role="assistant",
                 content=visible_answer,
                 model_trace=model_trace,
             )
-            memory_refresh_scheduled = schedule_memory_refresh(conversation_id)
+            memory_refresh_scheduled = schedule_memory_refresh(
+                conversation_id,
+                context_token_count=(
+                    (prompt.stats.estimated_input_tokens if prompt else 0)
+                    + estimate_chat_tokens(visible_answer)
+                ),
+                text_provider=memory_provider,
+                text_model=memory_model,
+                text_mode=memory_mode,
+            )
             title_generation_scheduled = bool(
                 user_message
                 and user_message.get("title_generation_eligible")
@@ -1179,7 +1200,7 @@ async def preview_paper(file: UploadFile = File(...)) -> dict[str, Any]:
         pdf_path = Path(tmpdir) / filename
         pdf_path.write_bytes(data)
         try:
-            parsed = parse_pdf(pdf_path)
+            parsed = parse_pdf(pdf_path, layout=False)
         except Exception as exc:  # noqa: BLE001 - return actionable parser details
             raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
 

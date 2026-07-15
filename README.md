@@ -52,7 +52,7 @@ Settings also includes a custom relay route. Users must explicitly select `OpenA
 
 The default route remains Zhipu `glm-5.2` for text and its automatic `glm-5v-turbo` vision pairing. You can also copy `.env.example` to `.env` and configure `TEXT_PROVIDER`, `MODEL_NAME`, and provider-specific keys manually. `VISION_PROVIDER` is retained for backward compatibility but is normalized to `TEXT_PROVIDER`; built-in providers use their recommended vision model, while a custom relay uses the explicit user-supplied vision model ID. Agent generation uses `LLM_TEMPERATURE`; grounded follow-up chat has its own lower `CHAT_TEMPERATURE` (default `0.25`). `CHAT_INPUT_TOKEN_BUDGET` sets the conservative dynamic input budget used to balance evidence, recent turns, and long-term memory (default `48000`).
 
-For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and select a text provider that offers a hosted vision model. The backend renders PDF visual regions to PNG, fans out one concurrent vision request per selected figure/chart by default, asks the paired vision model for concise Chinese visual summaries, and indexes them as `F` evidence. If the provider returns rate-limit errors, failed figures are automatically retried with the smaller `VISION_RETRY_WORKERS` pool.
+For figure/chart understanding, set `ENABLE_VISION_SUMMARY=true` and select a text provider that offers a hosted vision model. PyMuPDF4LLM Layout classifies body text, formulas, tables, captions, and picture regions; pictures cover both embedded raster images and PDF vector graphics. Captions are matched to same-page pictures geometrically instead of by unrelated list positions. The vision model receives only a verified bounding-box crop; a missing region is skipped and never silently rendered as a full page. Rate-limited figures are retried with the smaller `VISION_RETRY_WORKERS` pool.
 
 ## CLI Quick Start
 
@@ -78,8 +78,9 @@ The same check is available as the manually triggered `Live provider smoke tests
 
 ```text
 PDF
--> core.pdf_parser.parse_pdf
--> core.evidence.build_evidence_index
+-> PyMuPDF4LLM Layout classifies body, formulas, tables, captions, raster and vector figures
+-> core.pdf_parser.parse_pdf builds original-language sections and verified visual regions
+-> core.evidence.build_evidence_index + local multilingual embedding ranking
 -> MethodAgent + ExperimentAgent + CriticAgent read relevant text/table/figure evidence snippets
 -> SummaryAgent synthesizes structured notes with carried-forward evidence
 -> structured reading note
@@ -123,15 +124,17 @@ The composer can route each question through any provider whose key has already 
 
 The first question receives an immediate concise local title, then a background GLM request refines it into a short topic summary without overwriting a manual rename. Chat Markdown supports GFM tables and KaTeX-rendered inline or display mathematics. During streaming, new tokens follow the viewport only while the reader is already near the bottom; scrolling upward pauses auto-follow and exposes a one-click return-to-latest control.
 
-The long-conversation design follows the public Claude Code memory pattern: a concise memory index is loaded on every turn, while detailed topic memories are recalled only when relevant. The latest six complete rounds remain verbatim. Once another six older rounds become eligible, a background GLM task compacts them into the memory index and topic records without deleting the original messages or delaying the current answer. Each question can additionally recall relevant older original messages. A dynamic token budget prioritizes the current question, selected excerpt, original paper evidence, recent turns, analysis context, memory, and external sources instead of relying on a fixed message-count cutoff.
+The memory layer now uses LangMem 0.0.30 as its sole long-term-memory engine. After each completed answer, a background LangMem manager extracts, updates, or deletes structured `user`, `feedback`, `project`, and `reference` memories. Memories are scoped per paper, persisted in the existing SQLite database through a LangGraph `BaseStore` adapter, indexed locally with multilingual MiniLM embeddings, and retrieved by cosine similarity with a no-match threshold. A normal paper question therefore adds no model-side memory-selection call before the answer. Explicit ignore-memory requests inject no long-term context. Raw SQLite messages remain available for conversation history but are never reintroduced as long-term recall, so deleted memories cannot silently resurface from old messages. Legacy SQLite and file-based memories are imported once for compatibility.
 
-Each completed Live analysis returns an opaque `analysis_id`; the backend keeps that analysis's complete `E`/`T`/`F` evidence snippets in a bounded four-hour in-memory cache. For every question it combines Chinese/English query terms, conversational context, Agent-cited evidence IDs, and section intent to retrieve the most relevant original snippets. The answer prompt treats original paper evidence as authoritative and explicitly distinguishes paper facts, background knowledge, memory, and inference, while keeping internal evidence identifiers out of the final display.
+See [`docs/claude-memory-port.md`](docs/claude-memory-port.md) for the source-mechanism compliance matrix and runtime bindings.
+
+Each completed Live analysis returns an opaque `analysis_id`; the backend keeps that analysis's complete `E`/`T`/`F` evidence snippets in a bounded four-hour in-memory cache. Agent evidence selection, paper chat, comparison, old-message recall, and topic-memory recall use a local multilingual embedding as the primary ranker. First use downloads about 240 MB of `paraphrase-multilingual-MiniLM-L12-v2` into `.paper-reader/models/`; paper text stays local and no provider key is required. Lexical retrieval is retained only as an explicit fallback. Set `PAPER_READER_MODEL_DIR` to move the cache or `PAPER_READER_DISABLE_EMBEDDINGS=true` to disable embeddings. The answer prompt treats original paper evidence as authoritative and distinguishes paper facts, background knowledge, memory, and inference.
 
 Questions that explicitly ask for recent work, related papers, or comparisons with other papers can also use Semantic Scholar title/abstract metadata. This lookup is optional and fails closed; `SEMANTIC_SCHOLAR_API_KEY` can be configured for a dedicated API quota. Sample and Demo results use a deterministic reply so the complete interaction can be tested without another model call. Live in-memory chat sessions are recreated from persisted full evidence whenever a saved paper is reopened.
 
 ## Paper History
 
-Every completed upload is saved locally in `.paper-reader/` by default. The SQLite database contains paper metadata, structured Agent outputs, assessment results, complete evidence snippets, single-paper and comparison workspaces, chat conversations, immutable original messages, memory indexes, and topic memories; the original PDF is retained in `.paper-reader/papers/`. Uploading the same PDF again updates its existing history record instead of creating a duplicate. `Recent Papers` and the header History menu read this database, so a saved analysis and all of its conversations can be reopened after a browser refresh or backend restart without uploading the PDF again. Reopening a Live result recreates its grounded evidence session from the saved evidence.
+Every completed upload is saved locally in `.paper-reader/` by default. SQLite contains paper metadata, structured Agent outputs, assessment results, complete evidence snippets, single-paper and comparison workspaces, chat conversations, and immutable original messages. Original PDFs live in `.paper-reader/papers/`, while layered file memory lives in `.paper-reader/memory/`. Uploading the same PDF updates its existing history record instead of creating a duplicate. `Recent Papers` and History restore saved analyses and conversations after browser or backend restarts.
 
 Set `PAPER_READER_DATA_DIR` to move all history storage, or set `PAPER_HISTORY_DB` to choose a specific SQLite path. Deleting an item from the History menu removes both its database record and retained PDF.
 
@@ -140,7 +143,8 @@ See [CLAUDE.md](./CLAUDE.md) for the original architecture notes.
 ## Tech Stack
 
 - LangGraph for agent orchestration
-- PyMuPDF for PDF parsing, outline-based section detection, table extraction, and rendered figure regions
+- PyMuPDF4LLM Layout + PyMuPDF for body/formula/table/caption classification, raster/vector figure detection, and precise rendering
+- FastEmbed for local multilingual semantic retrieval; reliability remains a deterministic auditable score
 - Pydantic v2 for output schema validation
 - Evidence snippets for page/section-grounded claims (`E` text, `T` table, `F` vision figure summary)
 - FastAPI for the backend API and static hosting

@@ -27,6 +27,7 @@ class TestPaperPreview(unittest.TestCase):
             payload = asyncio.run(preview_paper(upload))
 
         parser.assert_called_once()
+        self.assertFalse(parser.call_args.kwargs["layout"])
         self.assertEqual(payload["paper"]["title"], "Original Paper Title")
         self.assertEqual(payload["paper"]["pages"], 5)
         self.assertEqual(payload["paper"]["sections_count"], 2)

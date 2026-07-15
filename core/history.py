@@ -180,6 +180,9 @@ def delete_paper_history(history_id: str) -> bool:
         pdf_path.unlink(missing_ok=True)
     except OSError:
         pass
+    from core.langmem_store import delete_paper_memories
+
+    delete_paper_memories(history_id)
     return True
 
 

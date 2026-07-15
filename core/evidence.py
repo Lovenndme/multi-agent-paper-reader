@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from core.pdf_parser import FigureBlock, ParsedPaper, Section, TableBlock, _normalize_title
+from core.semantic_search import semantic_scores
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,22 @@ AGENT_TERMS = {
         "experiments", "evaluation", "result", "results", "实验", "方法",
         "模型", "讨论", "局限", "结论", "未来工作", "相关工作",
     },
+}
+
+AGENT_SEMANTIC_QUERIES = {
+    "method": (
+        "Research problem, proposed method, model architecture, algorithm, objective, "
+        "training procedure and implementation details. 研究问题、提出的方法、模型架构、算法、"
+        "目标函数、训练过程与实现细节。"
+    ),
+    "experiment": (
+        "Experimental setup, datasets, baselines, evaluation metrics, quantitative results, "
+        "ablation studies and efficiency. 实验设置、数据集、基线、评估指标、定量结果、消融与效率。"
+    ),
+    "critic": (
+        "Assumptions, limitations, failure cases, threats to validity, comparison with prior work, "
+        "discussion and future work. 假设、局限、失败案例、有效性威胁、相关工作、讨论与未来工作。"
+    ),
 }
 
 
@@ -174,14 +191,22 @@ def select_evidence_snippets(
     max_chars: int,
     max_snippets: int,
 ) -> list[EvidenceSnippet]:
-    """Rank snippets by section and keyword relevance while preserving source text."""
+    """Rank snippets semantically, with lexical scoring only as a safe fallback."""
     terms = AGENT_TERMS.get(agent_type, set())
-    scored: list[tuple[int, int, EvidenceSnippet]] = []
+    documents = [f"{snippet.section}\n{snippet.text}" for snippet in snippets]
+    similarities = semantic_scores(
+        AGENT_SEMANTIC_QUERIES.get(agent_type, agent_type),
+        documents,
+    )
+    scored: list[tuple[float, int, EvidenceSnippet]] = []
     for index, snippet in enumerate(snippets):
-        haystack = f"{_normalize_title(snippet.section)} {snippet.text[:900].lower()}"
-        score = sum(1 for term in terms if term in haystack)
-        if "abstract" in haystack:
-            score += 1
+        if similarities is None:
+            haystack = f"{_normalize_title(snippet.section)} {snippet.text[:900].lower()}"
+            score = float(sum(1 for term in terms if term in haystack))
+            if "abstract" in haystack:
+                score += 1
+        else:
+            score = similarities[index] * 20.0
         if agent_type == "experiment" and snippet.kind == "table":
             score += 7
         if agent_type == "method" and snippet.kind == "figure":
@@ -196,7 +221,7 @@ def select_evidence_snippets(
     chosen: list[EvidenceSnippet] = []
     total_chars = 0
     for score, _, snippet in scored:
-        if score <= 0 and chosen:
+        if similarities is None and score <= 0 and chosen:
             continue
         next_size = len(snippet.text)
         if chosen and total_chars + next_size > max_chars:

@@ -1,47 +1,58 @@
-"""Persistent multi-conversation memory for paper follow-up chat."""
+"""Persistent paper conversations with LangMem-managed long-term memory."""
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
+import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langmem import create_memory_store_manager
 from pydantic import BaseModel, Field
 
 from core.conversation_titles import generate_conversation_title, local_conversation_title
 from core.history import history_database_connection
-from utils.llm import get_chat_llm, invoke_with_retry, parse_structured_output
+from core.langmem_store import (
+    PaperReaderMemory,
+    ensure_langmem_schema,
+    get_langmem_store,
+    list_langmem_memories,
+)
+from utils.llm import get_chat_llm, get_chat_llm_for_route
 
 
 RECENT_MESSAGE_COUNT = 12
-MEMORY_COMPACTION_BATCH = 12
-MAX_RECALLED_MESSAGES = 4
 MAX_RECALLED_TOPICS = 3
-MAX_RETRIEVAL_CANDIDATES = 2_000
+
+LOGGER = logging.getLogger(__name__)
 
 _MEMORY_REFRESH_LOCK = threading.RLock()
 _MEMORY_REFRESHING: set[str] = set()
+_MEMORY_PENDING: set[str] = set()
+_MEMORY_PENDING_ROUTE: dict[str, tuple[str, str, str]] = {}
+_MEMORY_THREADS: dict[str, threading.Thread] = {}
 
+_LANGMEM_INSTRUCTIONS = """
+Maintain concise long-term memory for a research-paper reading assistant.
 
-class MemoryTopic(BaseModel):
-    """One detailed topic file in the Claude Code-inspired memory layout."""
+Store only information that will materially improve future conversations about this paper:
+- user: stable role, expertise, goals, or responsibilities;
+- feedback: confirmed preferences and corrections about how answers should be produced;
+- project: non-derivable decisions, goals, deadlines, or ongoing reproduction context;
+- reference: stable locations where current external information should be checked.
 
-    topic: str = Field(min_length=1, max_length=80)
-    content: str = Field(min_length=1, max_length=8_000)
-
-
-class ConversationMemoryDigest(BaseModel):
-    """Compact memory index plus detailed topic memories."""
-
-    summary: str = Field(min_length=1, max_length=6_000)
-    topics: list[MemoryTopic] = Field(default_factory=list, max_length=8)
+Never store credentials, secrets, transient UI state, temporary navigation, or facts already recoverable from the paper.
+An explicit request to remember durable information must create or update a memory. An explicit correction must replace
+the contradicted memory instead of adding a duplicate. An explicit request to forget must delete the matching memory.
+Keep each memory self-contained, factual, and useful in isolation. Use category, subject, content, and context exactly
+as defined by the provided schema. It is correct to make no change when the exchange contains nothing durable.
+""".strip()
 
 
 class ConversationCreateRequest(BaseModel):
@@ -54,41 +65,35 @@ class ConversationUpdateRequest(BaseModel):
 
 @dataclass(frozen=True)
 class PromptMemory:
-    """Conversation context selected for one model request."""
+    """Recent turns plus semantically selected LangMem records for one request."""
 
     recent_messages: tuple[dict[str, Any], ...]
     recalled_messages: tuple[dict[str, Any], ...]
+    memory_index: str
     memory_summary: str
     recalled_topics: tuple[dict[str, Any], ...]
     total_messages: int
     memory_message_count: int
 
 
-MemorySummarizer = Callable[
-    [str, list[dict[str, Any]], list[dict[str, Any]]],
-    ConversationMemoryDigest,
-]
-
-
 def create_conversation(history_id: str, *, title: str | None = None) -> dict[str, Any]:
-    """Create an independent chat conversation for one saved paper."""
+    """Create an independent persisted conversation for one paper."""
     conversation_id = uuid.uuid4().hex
     now = _utc_now()
     clean_title = _clean_title(title) or "新对话"
     with history_database_connection() as connection:
         _ensure_schema(connection)
-        paper = connection.execute(
-            "SELECT id FROM paper_history WHERE id = ?",
-            (history_id,),
-        ).fetchone()
+        paper = connection.execute("SELECT id FROM paper_history WHERE id = ?", (history_id,)).fetchone()
         if paper is None:
             raise KeyError("Saved paper analysis was not found.")
         connection.execute(
             """
             INSERT INTO chat_conversations (
                 id, paper_history_id, title, memory_summary,
-                memory_message_count, created_at, updated_at
-            ) VALUES (?, ?, ?, '', 0, ?, ?)
+                memory_message_count, auto_memory_message_count,
+                session_memory_token_count, session_context_token_count,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, '', 0, 0, 0, 0, ?, ?)
             """,
             (conversation_id, history_id, clean_title, now, now),
         )
@@ -96,16 +101,14 @@ def create_conversation(history_id: str, *, title: str | None = None) -> dict[st
 
 
 def list_conversations(history_id: str) -> list[dict[str, Any]]:
-    """List all conversations for a paper, newest activity first."""
+    """List paper conversations by recent activity."""
     with history_database_connection() as connection:
         _ensure_schema(connection)
         rows = connection.execute(
             """
-            SELECT c.*,
-                   COUNT(m.id) AS message_count,
-                   MAX(m.created_at) AS last_message_at
-            FROM chat_conversations c
-            LEFT JOIN chat_messages m ON m.conversation_id = c.id
+            SELECT c.*, COUNT(m.id) AS message_count, MAX(m.created_at) AS last_message_at
+            FROM chat_conversations AS c
+            LEFT JOIN chat_messages AS m ON m.conversation_id = c.id
             WHERE c.paper_history_id = ?
             GROUP BY c.id
             ORDER BY c.updated_at DESC, c.created_at DESC
@@ -116,16 +119,14 @@ def list_conversations(history_id: str) -> list[dict[str, Any]]:
 
 
 def get_conversation_summary(conversation_id: str) -> dict[str, Any]:
-    """Return conversation metadata without loading all message bodies."""
+    """Return conversation metadata without loading message bodies."""
     with history_database_connection() as connection:
         _ensure_schema(connection)
         row = connection.execute(
             """
-            SELECT c.*,
-                   COUNT(m.id) AS message_count,
-                   MAX(m.created_at) AS last_message_at
-            FROM chat_conversations c
-            LEFT JOIN chat_messages m ON m.conversation_id = c.id
+            SELECT c.*, COUNT(m.id) AS message_count, MAX(m.created_at) AS last_message_at
+            FROM chat_conversations AS c
+            LEFT JOIN chat_messages AS m ON m.conversation_id = c.id
             WHERE c.id = ?
             GROUP BY c.id
             """,
@@ -137,7 +138,7 @@ def get_conversation_summary(conversation_id: str) -> dict[str, Any]:
 
 
 def load_conversation(conversation_id: str) -> dict[str, Any]:
-    """Load complete persisted messages for display and restart recovery."""
+    """Load all immutable original messages for display and restart recovery."""
     conversation = get_conversation_summary(conversation_id)
     with history_database_connection() as connection:
         _ensure_schema(connection)
@@ -146,18 +147,14 @@ def load_conversation(conversation_id: str) -> dict[str, Any]:
             SELECT id, role, content, quote, sequence, created_at, model_trace_json
             FROM chat_messages
             WHERE conversation_id = ?
-            ORDER BY sequence ASC
+            ORDER BY sequence
             """,
             (conversation_id,),
         ).fetchall()
-    return {
-        "conversation": conversation,
-        "messages": [_message_row(row) for row in rows],
-    }
+    return {"conversation": conversation, "messages": [_message_row(row) for row in rows]}
 
 
 def rename_conversation(conversation_id: str, title: str) -> dict[str, Any]:
-    """Rename one conversation."""
     clean_title = _clean_title(title)
     if not clean_title:
         raise ValueError("Conversation title cannot be empty.")
@@ -178,7 +175,7 @@ def schedule_conversation_title(
     *,
     expected_title: str,
 ) -> bool:
-    """Refine an automatic first-question title without blocking the answer stream."""
+    """Refine an automatic first-question title without blocking answer streaming."""
     if not expected_title:
         return False
 
@@ -190,8 +187,7 @@ def schedule_conversation_title(
             _ensure_schema(connection)
             connection.execute(
                 """
-                UPDATE chat_conversations
-                SET title = ?, updated_at = ?
+                UPDATE chat_conversations SET title = ?, updated_at = ?
                 WHERE id = ? AND title = ?
                 """,
                 (generated, _utc_now(), conversation_id, expected_title),
@@ -206,13 +202,10 @@ def schedule_conversation_title(
 
 
 def delete_conversation(conversation_id: str) -> bool:
-    """Delete one conversation, its messages, and topic memories."""
+    """Delete one conversation and its messages; paper-level LangMem remains shared."""
     with history_database_connection() as connection:
         _ensure_schema(connection)
-        cursor = connection.execute(
-            "DELETE FROM chat_conversations WHERE id = ?",
-            (conversation_id,),
-        )
+        cursor = connection.execute("DELETE FROM chat_conversations WHERE id = ?", (conversation_id,))
     return cursor.rowcount > 0
 
 
@@ -224,7 +217,7 @@ def add_conversation_message(
     quote: str | None = None,
     model_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Append one immutable original message to a conversation."""
+    """Append one immutable original message."""
     clean_content = content.strip()
     if not clean_content:
         raise ValueError("Message content cannot be empty.")
@@ -246,8 +239,7 @@ def add_conversation_message(
         connection.execute(
             """
             INSERT INTO chat_messages (
-                id, conversation_id, role, content, quote, sequence, created_at,
-                model_trace_json
+                id, conversation_id, role, content, quote, sequence, created_at, model_trace_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -258,9 +250,7 @@ def add_conversation_message(
                 quote or None,
                 sequence,
                 now,
-                json.dumps(model_trace, ensure_ascii=False, separators=(",", ":"))
-                if model_trace
-                else None,
+                json.dumps(model_trace, ensure_ascii=False, separators=(",", ":")) if model_trace else None,
             ),
         )
         title = str(conversation["title"])
@@ -290,21 +280,26 @@ def get_prompt_memory(
     question: str,
     *,
     recent_count: int = RECENT_MESSAGE_COUNT,
-    recalled_message_limit: int = MAX_RECALLED_MESSAGES,
+    recalled_message_limit: int = 0,
     recalled_topic_limit: int = MAX_RECALLED_TOPICS,
 ) -> PromptMemory:
-    """Load recent turns plus query-relevant topic and original-message memories."""
+    """Load recent messages and direct local-vector LangMem recall.
+
+    Old raw messages are intentionally not reintroduced as long-term memory. This
+    prevents an explicitly forgotten fact from resurfacing through message search.
+    """
+    del recalled_message_limit
     with history_database_connection() as connection:
         _ensure_schema(connection)
         conversation = connection.execute(
-            "SELECT memory_summary, memory_message_count FROM chat_conversations WHERE id = ?",
+            "SELECT paper_history_id, auto_memory_message_count FROM chat_conversations WHERE id = ?",
             (conversation_id,),
         ).fetchone()
         if conversation is None:
             raise KeyError("Conversation was not found.")
         recent_rows = connection.execute(
             """
-            SELECT id, role, content, quote, sequence, created_at
+            SELECT id, role, content, quote, sequence, created_at, model_trace_json
             FROM chat_messages
             WHERE conversation_id = ?
             ORDER BY sequence DESC
@@ -313,290 +308,215 @@ def get_prompt_memory(
             (conversation_id, max(2, recent_count)),
         ).fetchall()
         recent_rows = list(reversed(recent_rows))
-        oldest_recent = int(recent_rows[0]["sequence"]) if recent_rows else 2**31
-        old_rows = connection.execute(
-            """
-            SELECT id, role, content, quote, sequence, created_at
-            FROM chat_messages
-            WHERE conversation_id = ? AND sequence < ?
-            ORDER BY sequence DESC
-            LIMIT ?
-            """,
-            (conversation_id, oldest_recent, MAX_RETRIEVAL_CANDIDATES),
-        ).fetchall()
-        topic_rows = connection.execute(
-            """
-            SELECT id, topic, content, source_start_sequence, source_end_sequence, updated_at
-            FROM chat_memories
-            WHERE conversation_id = ?
-            ORDER BY updated_at DESC
-            LIMIT 200
-            """,
-            (conversation_id,),
-        ).fetchall()
         count_row = connection.execute(
             "SELECT COUNT(*) AS count FROM chat_messages WHERE conversation_id = ?",
             (conversation_id,),
         ).fetchone()
 
-    terms = _memory_terms(question)
-    recalled_messages = _rank_rows(old_rows, terms, recalled_message_limit, kind="message")
-    recalled_topics = _rank_rows(topic_rows, terms, recalled_topic_limit, kind="topic")
+    ignore_memory = _should_ignore_memory(question)
+    recalled_topics = [] if ignore_memory else list_langmem_memories(
+        str(conversation["paper_history_id"]),
+        query=question,
+        limit=recalled_topic_limit,
+    )
     return PromptMemory(
         recent_messages=tuple(_message_row(row) for row in recent_rows),
-        recalled_messages=tuple(_message_row(row) for row in recalled_messages),
-        memory_summary=str(conversation["memory_summary"] or ""),
-        recalled_topics=tuple(_topic_row(row) for row in recalled_topics),
+        recalled_messages=(),
+        memory_index="",
+        memory_summary="",
+        recalled_topics=tuple(recalled_topics),
         total_messages=int(count_row["count"]),
-        memory_message_count=int(conversation["memory_message_count"]),
+        memory_message_count=int(conversation["auto_memory_message_count"]),
     )
 
 
 def memory_refresh_needed(conversation_id: str) -> bool:
-    """Return whether enough old messages are ready for the next compaction batch."""
-    return bool(_messages_for_compaction(conversation_id))
+    return bool(_messages_for_langmem(conversation_id))
 
 
 def refresh_conversation_memory(
     conversation_id: str,
     *,
-    summarizer: MemorySummarizer | None = None,
+    force: bool = False,
+    text_provider: str | None = None,
+    text_model: str | None = None,
+    text_mode: str | None = None,
+    **_: Any,
 ) -> int:
-    """Compact eligible old messages into an index and topic memories."""
-    processed = 0
-    summarize = summarizer or _summarize_with_model
-    while True:
-        batch = _messages_for_compaction(conversation_id)
-        if not batch:
-            break
-        with history_database_connection() as connection:
-            _ensure_schema(connection)
-            conversation = connection.execute(
-                "SELECT memory_summary FROM chat_conversations WHERE id = ?",
-                (conversation_id,),
-            ).fetchone()
-            topic_rows = connection.execute(
-                "SELECT topic, content FROM chat_memories WHERE conversation_id = ? ORDER BY topic",
-                (conversation_id,),
-            ).fetchall()
-        if conversation is None:
-            break
-        existing_topics = [dict(row) for row in topic_rows]
-        try:
-            digest = summarize(str(conversation["memory_summary"] or ""), existing_topics, batch)
-        except Exception:
-            digest = _fallback_digest(str(conversation["memory_summary"] or ""), batch)
-        _store_digest(conversation_id, digest, batch)
-        processed += len(batch)
-    return processed
-
-
-def schedule_memory_refresh(conversation_id: str) -> bool:
-    """Refresh memory in a daemon thread so answer latency is unaffected."""
-    if not memory_refresh_needed(conversation_id):
-        return False
-    with _MEMORY_REFRESH_LOCK:
-        if conversation_id in _MEMORY_REFRESHING:
-            return False
-        _MEMORY_REFRESHING.add(conversation_id)
-
-    def run() -> None:
-        try:
-            refresh_conversation_memory(conversation_id)
-        finally:
-            with _MEMORY_REFRESH_LOCK:
-                _MEMORY_REFRESHING.discard(conversation_id)
-
-    threading.Thread(
-        target=run,
-        name=f"paper-chat-memory-{conversation_id[:8]}",
-        daemon=True,
-    ).start()
-    return True
-
-
-def _messages_for_compaction(conversation_id: str) -> list[dict[str, Any]]:
+    """Run one LangMem background enrichment over unprocessed complete turns."""
+    del force
+    batch = _messages_for_langmem(conversation_id)
+    if not batch:
+        return 0
     with history_database_connection() as connection:
         _ensure_schema(connection)
         conversation = connection.execute(
-            "SELECT memory_message_count FROM chat_conversations WHERE id = ?",
+            "SELECT paper_history_id FROM chat_conversations WHERE id = ?",
             (conversation_id,),
         ).fetchone()
-        if conversation is None:
-            return []
-        max_row = connection.execute(
-            "SELECT COALESCE(MAX(sequence), 0) AS max_sequence FROM chat_messages WHERE conversation_id = ?",
-            (conversation_id,),
-        ).fetchone()
-        compact_through = int(max_row["max_sequence"]) - RECENT_MESSAGE_COUNT
-        start_after = int(conversation["memory_message_count"])
-        if compact_through - start_after < MEMORY_COMPACTION_BATCH:
-            return []
-        rows = connection.execute(
-            """
-            SELECT id, role, content, quote, sequence, created_at
-            FROM chat_messages
-            WHERE conversation_id = ? AND sequence > ? AND sequence <= ?
-            ORDER BY sequence ASC
-            LIMIT ?
-            """,
-            (conversation_id, start_after, compact_through, MEMORY_COMPACTION_BATCH),
-        ).fetchall()
-    return [_message_row(row) for row in rows]
-
-
-def _store_digest(
-    conversation_id: str,
-    digest: ConversationMemoryDigest,
-    batch: list[dict[str, Any]],
-) -> None:
-    start_sequence = int(batch[0]["sequence"])
+    if conversation is None:
+        return 0
+    history_id = str(conversation["paper_history_id"])
+    llm = (
+        get_chat_llm_for_route(text_provider, text_model, text_mode or "")
+        if text_provider and text_model
+        else get_chat_llm()
+    )
+    manager = create_memory_store_manager(
+        llm,
+        schemas=[PaperReaderMemory],
+        instructions=_LANGMEM_INSTRUCTIONS,
+        enable_inserts=True,
+        enable_deletes=True,
+        query_limit=6,
+        namespace=("paper-reader", "{paper_history_id}"),
+        store=get_langmem_store(),
+    )
+    config = {"configurable": {"paper_history_id": history_id}}
+    messages = [
+        {"role": item["role"], "content": item["content"]}
+        for item in batch
+    ]
+    try:
+        manager.invoke({"messages": messages}, config=config)
+    except Exception as exc:  # keep the cursor unchanged so the next turn retries
+        LOGGER.warning("LangMem update failed for conversation %s: %s", conversation_id, exc)
+        return 0
     end_sequence = int(batch[-1]["sequence"])
-    now = _utc_now()
     with history_database_connection() as connection:
         _ensure_schema(connection)
         connection.execute(
             """
             UPDATE chat_conversations
-            SET memory_summary = ?, memory_message_count = ?, updated_at = ?
+            SET auto_memory_message_count = ?, memory_message_count = ?, updated_at = ?
             WHERE id = ?
             """,
-            (digest.summary, end_sequence, now, conversation_id),
+            (end_sequence, end_sequence, _utc_now(), conversation_id),
         )
-        for topic in digest.topics:
-            topic_name = _clean_title(topic.topic) or "历史对话"
-            connection.execute(
-                """
-                INSERT INTO chat_memories (
-                    id, conversation_id, topic, content, source_start_sequence,
-                    source_end_sequence, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(conversation_id, topic) DO UPDATE SET
-                    content = excluded.content,
-                    source_start_sequence = MIN(chat_memories.source_start_sequence, excluded.source_start_sequence),
-                    source_end_sequence = excluded.source_end_sequence,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    uuid.uuid4().hex,
-                    conversation_id,
-                    topic_name,
-                    topic.content,
-                    start_sequence,
-                    end_sequence,
-                    now,
-                    now,
-                ),
-            )
+    return len(batch)
 
 
-def _summarize_with_model(
-    existing_summary: str,
-    existing_topics: list[dict[str, Any]],
-    batch: list[dict[str, Any]],
-) -> ConversationMemoryDigest:
-    transcript = "\n".join(
-        f"#{item['sequence']} {item['role']}: {item['content']}"
-        for item in batch
-    )
-    topics = "\n\n".join(
-        f"## {item['topic']}\n{item['content']}"
-        for item in existing_topics
-    ) or "无"
-    messages = [
-            SystemMessage(
-                content=(
-                    "你负责维护论文追问的长期记忆，工作方式类似精简 MEMORY.md 索引加按需加载的主题文件。"
-                    "只保留未来问答真正需要的稳定信息：用户目标、已确认结论、重要数字与证据ID、"
-                    "用户纠正、术语约定和尚未解决的问题。不得把模型猜测写成论文事实。"
-                    "summary 必须简洁，作为每轮自动加载的记忆索引；topics 保存可按需召回的详细信息。"
-                    "只返回一个有效 JSON 对象，不要使用 Markdown。"
-                )
-            ),
-            HumanMessage(
-                content=(
-                    f"现有记忆索引：\n{existing_summary or '无'}\n\n"
-                    f"现有主题记忆：\n{topics}\n\n"
-                    f"需要压缩的新对话：\n{transcript}\n\n"
-                    "请合并而不是丢弃仍然有效的旧信息；若用户纠正了旧结论，以新结论为准。\n"
-                    "严格按以下形状返回："
-                    + json.dumps(
-                        {
-                            "summary": "简洁的长期记忆索引",
-                            "topics": [
-                                {"topic": "主题名", "content": "该主题的详细长期记忆"}
-                            ],
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-            ),
-        ]
-    response = invoke_with_retry(get_chat_llm(), messages, retries=1, delay=1.0)
-    return parse_structured_output(response, ConversationMemoryDigest)
+def extract_auto_memory(conversation_id: str, **kwargs: Any) -> int:
+    """Compatibility alias for callers migrating from the former memory layer."""
+    return refresh_conversation_memory(conversation_id, **kwargs)
 
 
-def _fallback_digest(
-    existing_summary: str,
-    batch: list[dict[str, Any]],
-) -> ConversationMemoryDigest:
-    lines = [existing_summary.strip()] if existing_summary.strip() else []
-    lines.extend(
-        f"- #{item['sequence']} {('用户' if item['role'] == 'user' else '助手')}：{item['content'][:320]}"
-        for item in batch
-    )
-    summary = "\n".join(lines)[-5_800:]
-    content = "\n".join(
-        f"#{item['sequence']} {item['role']}: {item['content'][:900]}"
-        for item in batch
-    )[-7_800:]
-    return ConversationMemoryDigest(
-        summary=summary or "对话已建立长期记忆。",
-        topics=[MemoryTopic(topic="历史对话", content=content)],
-    )
-
-
-def _rank_rows(
-    rows: list[sqlite3.Row],
-    terms: set[str],
-    limit: int,
+def schedule_memory_refresh(
+    conversation_id: str,
     *,
-    kind: Literal["message", "topic"],
-) -> list[sqlite3.Row]:
-    if not terms or limit <= 0:
-        return []
-    scored: list[tuple[float, int, sqlite3.Row]] = []
-    for row in rows:
-        if kind == "topic":
-            haystack = f"{row['topic']} {row['content']}".lower()
-            sequence = int(row["source_end_sequence"])
-        else:
-            haystack = f"{row['content']} {row['quote'] or ''}".lower()
-            sequence = int(row["sequence"])
-        score = sum(min(haystack.count(term), 4) * (3.0 if len(term) > 2 else 1.0) for term in terms)
-        evidence_ids = re.findall(r"\b[ETF]\d{3}\b", haystack, re.I)
-        if any(evidence_id.lower() in terms for evidence_id in evidence_ids):
-            score += 20
-        if score > 0:
-            scored.append((score, sequence, row))
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = [item[2] for item in scored[:limit]]
-    if kind == "message":
-        selected.sort(key=lambda row: int(row["sequence"]))
-    return selected
+    context_token_count: int | None = None,
+    text_provider: str | None = None,
+    text_model: str | None = None,
+    text_mode: str | None = None,
+) -> bool:
+    """Coalesce LangMem background updates after complete assistant turns."""
+    if context_token_count and context_token_count > 0:
+        with history_database_connection() as connection:
+            _ensure_schema(connection)
+            connection.execute(
+                "UPDATE chat_conversations SET session_context_token_count = ? WHERE id = ?",
+                (int(context_token_count), conversation_id),
+            )
+    route = (
+        (text_provider, text_model, text_mode or "")
+        if text_provider and text_model
+        else None
+    )
+    with _MEMORY_REFRESH_LOCK:
+        if conversation_id in _MEMORY_REFRESHING:
+            _MEMORY_PENDING.add(conversation_id)
+            if route:
+                _MEMORY_PENDING_ROUTE[conversation_id] = route
+            return True
+        _MEMORY_REFRESHING.add(conversation_id)
+
+    def run() -> None:
+        restart = False
+        current_route = route
+        try:
+            while True:
+                refresh_conversation_memory(
+                    conversation_id,
+                    text_provider=current_route[0] if current_route else None,
+                    text_model=current_route[1] if current_route else None,
+                    text_mode=current_route[2] if current_route else None,
+                )
+                with _MEMORY_REFRESH_LOCK:
+                    if conversation_id not in _MEMORY_PENDING:
+                        break
+                    _MEMORY_PENDING.discard(conversation_id)
+                    current_route = _MEMORY_PENDING_ROUTE.pop(conversation_id, current_route)
+        finally:
+            with _MEMORY_REFRESH_LOCK:
+                restart = conversation_id in _MEMORY_PENDING
+                _MEMORY_PENDING.discard(conversation_id)
+                restart_route = _MEMORY_PENDING_ROUTE.pop(conversation_id, None)
+                _MEMORY_REFRESHING.discard(conversation_id)
+                _MEMORY_THREADS.pop(conversation_id, None)
+            if restart:
+                schedule_memory_refresh(
+                    conversation_id,
+                    text_provider=restart_route[0] if restart_route else None,
+                    text_model=restart_route[1] if restart_route else None,
+                    text_mode=restart_route[2] if restart_route else None,
+                )
+
+    worker = threading.Thread(
+        target=run,
+        name=f"paper-chat-langmem-{conversation_id[:8]}",
+        daemon=True,
+    )
+    with _MEMORY_REFRESH_LOCK:
+        _MEMORY_THREADS[conversation_id] = worker
+    worker.start()
+    return True
 
 
-def _memory_terms(text: str) -> set[str]:
-    lowered = text.lower()
-    terms = {
-        token
-        for token in re.findall(r"[a-z][a-z0-9_-]{1,}|[ETF]\d{3}", lowered, re.I)
-        if token not in {"what", "which", "with", "that", "this", "from", "about", "please"}
-    }
-    for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-        terms.add(sequence)
-        terms.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
-    return {term.lower() for term in terms if len(term) >= 2}
+def drain_memory_refreshes(timeout: float = 60.0) -> None:
+    """Wait softly for in-flight LangMem updates during shutdown or tests."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        with _MEMORY_REFRESH_LOCK:
+            workers = [worker for worker in _MEMORY_THREADS.values() if worker.is_alive()]
+        if not workers:
+            return
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            worker.join(timeout=min(remaining, 0.25))
+
+
+def _messages_for_langmem(conversation_id: str) -> list[dict[str, Any]]:
+    with history_database_connection() as connection:
+        _ensure_schema(connection)
+        conversation = connection.execute(
+            "SELECT auto_memory_message_count FROM chat_conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if conversation is None:
+            return []
+        rows = connection.execute(
+            """
+            SELECT id, role, content, quote, sequence, created_at, model_trace_json
+            FROM chat_messages
+            WHERE conversation_id = ? AND sequence > ?
+            ORDER BY sequence
+            LIMIT 2000
+            """,
+            (conversation_id, int(conversation["auto_memory_message_count"])),
+        ).fetchall()
+    messages = [_message_row(row) for row in rows]
+    if messages and messages[-1]["role"] == "user":
+        messages.pop()
+    return messages
+
+
+def _should_ignore_memory(question: str) -> bool:
+    lowered = question.casefold()
+    english = re.search(r"\b(ignore|do not use|don't use|without using)\b.{0,24}\b(memory|memories)\b", lowered)
+    chinese = re.search(r"(?:忽略|不要使用|别用|不使用|清空)(?:.{0,12})(?:记忆|历史记忆|长期记忆)", question)
+    return bool(english or chinese)
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
@@ -608,6 +528,9 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             title TEXT NOT NULL,
             memory_summary TEXT NOT NULL DEFAULT '',
             memory_message_count INTEGER NOT NULL DEFAULT 0,
+            auto_memory_message_count INTEGER NOT NULL DEFAULT 0,
+            session_memory_token_count INTEGER NOT NULL DEFAULT 0,
+            session_context_token_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (paper_history_id) REFERENCES paper_history(id) ON DELETE CASCADE
@@ -644,27 +567,35 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_sequence
         ON chat_messages(conversation_id, sequence);
-
-        CREATE INDEX IF NOT EXISTS idx_chat_memories_conversation
-        ON chat_memories(conversation_id, updated_at DESC);
         """
     )
-    columns = {
-        str(row["name"])
-        for row in connection.execute("PRAGMA table_info(chat_messages)").fetchall()
-    }
+    columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(chat_messages)")}
     if "model_trace_json" not in columns:
         connection.execute("ALTER TABLE chat_messages ADD COLUMN model_trace_json TEXT")
+    conversation_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(chat_conversations)")
+    }
+    additions = {
+        "auto_memory_message_count": "INTEGER NOT NULL DEFAULT 0",
+        "session_memory_token_count": "INTEGER NOT NULL DEFAULT 0",
+        "session_context_token_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, definition in additions.items():
+        if name not in conversation_columns:
+            connection.execute(f"ALTER TABLE chat_conversations ADD COLUMN {name} {definition}")
+    ensure_langmem_schema(connection)
 
 
 def _conversation_row(row: sqlite3.Row) -> dict[str, Any]:
+    cursor = int(row["auto_memory_message_count"])
     return {
         "id": str(row["id"]),
         "history_id": str(row["paper_history_id"]),
         "title": str(row["title"]),
         "message_count": int(row["message_count"]),
-        "memory_message_count": int(row["memory_message_count"]),
-        "memory_ready": bool(row["memory_summary"]),
+        "memory_message_count": cursor,
+        "memory_ready": cursor > 0,
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
         "last_message_at": str(row["last_message_at"] or row["updated_at"]),
@@ -689,17 +620,6 @@ def _message_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "sequence": int(row["sequence"]),
         "created_at": str(row["created_at"]),
         "model_trace": model_trace,
-    }
-
-
-def _topic_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": str(row["id"]),
-        "topic": str(row["topic"]),
-        "content": str(row["content"]),
-        "source_start_sequence": int(row["source_start_sequence"]),
-        "source_end_sequence": int(row["source_end_sequence"]),
-        "updated_at": str(row["updated_at"]),
     }
 
 

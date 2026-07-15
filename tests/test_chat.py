@@ -176,6 +176,28 @@ class TestPaperChat(unittest.TestCase):
         self.assertIn("accuracy, F1 score, and latency", messages[0].content)
         self.assertIn("[E002 | text | Experiments | p.5]", messages[0].content)
 
+    def test_session_retrieval_uses_semantic_scores_as_primary_ranker(self):
+        snippets = [
+            EvidenceSnippet("E001", "Alpha", 0, 0, "lexically unrelated first chunk"),
+            EvidenceSnippet("E002", "Beta", 1, 1, "the intended semantic answer"),
+        ]
+        analysis_id = store_analysis_session(snippets, {"paper": {"title": "Semantic"}})
+
+        with patch(
+            "core.chat.semantic_scores",
+            side_effect=[[0.05, 0.92], [0.10, 0.90]],
+        ) as ranker:
+            retrieved = retrieve_chat_evidence(
+                get_analysis_session(analysis_id),
+                "跨语言语义问题",
+                None,
+                [],
+                limit=2,
+            )
+
+        self.assertEqual(retrieved[0].id, "E002")
+        self.assertEqual(ranker.call_count, 2)
+
     def test_agent_citations_bridge_translated_summary_back_to_source(self):
         snippets = [
             EvidenceSnippet(

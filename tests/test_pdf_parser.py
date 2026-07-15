@@ -3,6 +3,7 @@
 import textwrap
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from core.pdf_parser import (
     _looks_like_font_header,
     _matches_header_pattern,
     _normalize_title,
+    _extract_layout_content,
     parse_pdf,
 )
 
@@ -81,6 +83,70 @@ class TestPaperTitleInference(unittest.TestCase):
             parsed = parse_pdf(path)
 
         self.assertEqual(parsed.title, "A Reliable Paper Title")
+
+
+class TestLayoutExtraction(unittest.TestCase):
+    def test_extracts_vector_picture_bbox_and_excludes_internal_labels(self):
+        payload = {
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width": 600,
+                    "height": 800,
+                    "boxes": [
+                        {
+                            "x0": 100,
+                            "y0": 80,
+                            "x1": 500,
+                            "y1": 330,
+                            "boxclass": "picture",
+                            "textlines": [
+                                {"spans": [{"text": "Transformer Block", "bbox": [120, 100, 230, 112], "size": 8}]}
+                            ],
+                        },
+                        {
+                            "x0": 100,
+                            "y0": 340,
+                            "x1": 500,
+                            "y1": 370,
+                            "boxclass": "text",
+                            "textlines": [
+                                {"spans": [{"text": "Figure 2 | Vector architecture.", "bbox": [100, 340, 320, 352], "size": 10}]}
+                            ],
+                        },
+                        {
+                            "x0": 70,
+                            "y0": 390,
+                            "x1": 530,
+                            "y1": 410,
+                            "boxclass": "section-header",
+                            "textlines": [
+                                {"spans": [{"text": "2. Method", "bbox": [70, 390, 145, 402], "size": 14}]}
+                            ],
+                        },
+                        {
+                            "x0": 70,
+                            "y0": 420,
+                            "x1": 530,
+                            "y1": 470,
+                            "boxclass": "text",
+                            "textlines": [
+                                {"spans": [{"text": "The body explains the architecture.", "bbox": [70, 420, 300, 432], "size": 10}]}
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        with patch("core.pdf_parser.pymupdf4llm.to_json", return_value=json.dumps(payload)):
+            pages, sections, tables, figures = _extract_layout_content(Path("vector.pdf"))
+
+        self.assertEqual(tables, [])
+        self.assertEqual(figures[0].bbox, (100.0, 80.0, 500.0, 330.0))
+        self.assertIn("Figure 2", figures[0].caption)
+        self.assertNotIn("Transformer Block", pages[0][1])
+        self.assertNotIn("Figure 2", pages[0][1])
+        self.assertIn("body explains", sections[0].content)
 
 
 class TestParsedPaperSectionRouting(unittest.TestCase):

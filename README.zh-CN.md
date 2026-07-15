@@ -52,7 +52,7 @@ Settings 还提供“自定义中转站”。用户必须明确选择 `OpenAI-co
 
 默认路由仍为智谱 `glm-5.2` 文本模型，并自动配对 `glm-5v-turbo` 视觉模型。也可以将 `.env.example` 复制为 `.env`，手动配置 `TEXT_PROVIDER`、`MODEL_NAME` 以及相应厂商的 Key。为兼容旧配置，`VISION_PROVIDER` 仍会被读取，但运行时会强制归一为 `TEXT_PROVIDER`；内置厂商使用目录中的推荐视觉模型，自定义中转站使用用户明确填写的视觉模型 ID。Agent 生成温度由 `LLM_TEMPERATURE` 控制；基于证据的论文追问使用独立的低温配置 `CHAT_TEMPERATURE`，默认值为 `0.25`。`CHAT_INPUT_TOKEN_BUDGET` 用于设置证据、近期对话和长期记忆共享的保守动态输入预算，默认值为 `48000`。
 
-如需理解论文中的图像和图表，请设置 `ENABLE_VISION_SUMMARY=true`，并选择带有官方托管视觉模型的文本厂商。后端会将 PDF 中的视觉区域渲染为 PNG，默认并发请求各个选中的图像或图表，让自动配对的视觉模型生成简洁中文摘要，并将其记录为 `F` 类证据。如果供应商返回限流错误，失败图像会自动使用更小的 `VISION_RETRY_WORKERS` 并发池重试。
+如需理解论文中的图像和图表，请设置 `ENABLE_VISION_SUMMARY=true`，并选择带有官方托管视觉模型的文本厂商。后端使用 PyMuPDF4LLM Layout 区分正文、公式、表格、图注和 picture 区域；picture 同时覆盖嵌入位图与 PDF 矢量图。图注通过同页几何位置与 picture 配对，不再按两个无关列表的序号硬配；视觉模型只接收具有已验证 bbox 的精确裁剪，找不到区域时会跳过，绝不会静默退化成整页截图。失败图像会自动使用更小的 `VISION_RETRY_WORKERS` 并发池重试。
 
 ## CLI 快速开始
 
@@ -78,8 +78,9 @@ python tools/provider_smoke.py openai deepseek doubao
 
 ```text
 PDF
--> core.pdf_parser.parse_pdf
--> core.evidence.build_evidence_index
+-> PyMuPDF4LLM Layout 分类正文、公式、表格、图注、位图与矢量图
+-> core.pdf_parser.parse_pdf 构建原始语言章节和精确视觉区域
+-> core.evidence.build_evidence_index + 本地多语言 Embedding 语义排序
 -> MethodAgent + ExperimentAgent + CriticAgent 读取相关正文/表格/图像证据片段
 -> SummaryAgent 综合各 Agent 输出及其证据
 -> 结构化论文研读笔记
@@ -123,15 +124,17 @@ PDF
 
 首条问题发送后，系统会立即给出精简的本地临时标题，再由后台 GLM 将其整理为简短的主题摘要；如果用户已经手动改名，自动标题不会覆盖该名称。追问内容支持 GFM 表格以及由 KaTeX 渲染的行内和块级数学公式。流式回答只会在用户停留于底部时自动跟随新 Token；用户主动向上阅读后会暂停跟随，并显示一键回到最新回答的按钮。
 
-长对话架构参考了 Claude Code 公开的记忆模式：每轮自动加载一份精简记忆索引，仅在问题相关时召回详细主题记忆。最近六个完整问答轮次会保留原文；每当又有六个较早轮次满足压缩条件时，后台 GLM 任务会将它们整理进记忆索引和主题记录，同时保留全部原始消息，也不会阻塞当前回答。每个问题还可以按需召回相关的早期原始消息。动态 Token 预算会优先分配给当前问题、选中片段、论文原文证据、近期对话、分析上下文、记忆和外部资料，不再依赖固定消息条数。
+记忆层现已统一使用 LangMem 0.0.30，不再保留自研的 Claude Code 仿制管线。每个完整回答结束后，后台 LangMem 管理器会抽取、更新或删除 `user`、`feedback`、`project`、`reference` 四类结构化长期记忆。记忆按论文隔离，通过 LangGraph `BaseStore` 适配器持久化到现有 SQLite，并使用本地多语言 MiniLM Embedding 与余弦相似度检索；低于阈值时直接返回无匹配，因此普通论文追问在回答前不会新增模型侧记忆选择调用。用户明确要求忽略记忆时，本轮不注入任何长期记忆。SQLite 原始消息仍用于会话历史展示，但不会再被当作长期记忆召回，避免已删除信息从旧消息中重新出现。旧 SQLite 与文件记忆只进行一次兼容导入。
 
-每次完成正式分析后，系统都会返回一个不透明的 `analysis_id`。后端在有界的四小时内存缓存中保留该分析对应的完整 `E`/`T`/`F` 证据片段。收到问题后，系统会综合中英文查询词、对话上下文、Agent 引用的证据 ID 和章节意图，从论文原文中选出最相关的片段。回答 Prompt 将论文原文证据视为最高依据，要求标注证据 ID 和页码，并明确区分论文事实、背景知识、长期记忆与模型推断。
+源码机制与运行时映射的逐项清单见 [`docs/claude-memory-port.md`](docs/claude-memory-port.md)。
+
+每次完成正式分析后，系统都会返回一个不透明的 `analysis_id`。后端在有界的四小时内存缓存中保留该分析对应的完整 `E`/`T`/`F` 证据片段。Agent 取证、论文追问、多论文对比、早期消息召回和主题记忆召回以本机多语言 Embedding 为主排序；首次使用会下载约 240 MB 的 `paraphrase-multilingual-MiniLM-L12-v2` 到 `.paper-reader/models/`，不发送论文文本，也不需要厂商 Key。模型不可用时才回退到旧的词面检索。可通过 `PAPER_READER_MODEL_DIR` 修改缓存目录，或用 `PAPER_READER_DISABLE_EMBEDDINGS=true` 明确关闭。回答 Prompt 将论文原文证据视为最高依据，并明确区分论文事实、背景知识、长期记忆与模型推断。
 
 当用户明确询问近期工作、相关论文或与其他论文的对比时，系统还可以使用 Semantic Scholar 提供的题录和摘要信息。该查询是可选能力，失败时会安全降级；可以设置 `SEMANTIC_SCHOLAR_API_KEY` 以使用独立 API 配额。Sample 和 Demo 结果采用确定性回复，因此无需额外调用模型也能验证完整交互流程。重新打开已保存论文时，系统会从持久化的完整证据中重新建立实时聊天证据会话。
 
 ## 论文历史
 
-每次完成的上传默认保存在本地 `.paper-reader/` 目录。SQLite 数据库中包含论文元数据、结构化 Agent 输出、评估结果、完整证据片段、单篇与多论文对比工作区、聊天会话、不可变原始消息、记忆索引和主题记忆；原始 PDF 保存在 `.paper-reader/papers/`。再次上传同一份 PDF 时，系统会更新已有历史记录，而不是重复创建。`Recent Papers` 和顶部 History 菜单均从该数据库读取数据，因此用户刷新浏览器或重启后端后，可以直接恢复论文分析及其全部会话，无需重新上传 PDF。重新打开正式分析结果时，系统还会根据已保存证据重建追问所需的证据会话。
+每次完成的上传默认保存在本地 `.paper-reader/` 目录。SQLite 数据库中包含论文元数据、结构化 Agent 输出、评估结果、完整证据片段、单篇与多论文对比工作区、聊天会话及不可变原始消息；原始 PDF 保存在 `.paper-reader/papers/`，分层文件记忆保存在 `.paper-reader/memory/`。再次上传同一份 PDF 时，系统会更新已有历史记录，而不是重复创建。`Recent Papers` 和顶部 History 菜单均从该数据库读取数据，因此用户刷新浏览器或重启后端后，可以直接恢复论文分析及其全部会话，无需重新上传 PDF。重新打开正式分析结果时，系统还会根据已保存证据重建追问所需的证据会话。
 
 可以通过 `PAPER_READER_DATA_DIR` 修改全部历史数据的存储位置，或通过 `PAPER_HISTORY_DB` 指定 SQLite 文件路径。从 History 菜单删除论文时，其数据库记录、追问会话和保留的 PDF 文件都会一并删除。
 
@@ -140,7 +143,8 @@ PDF
 ## 技术栈
 
 - LangGraph：编排多 Agent 工作流
-- PyMuPDF：PDF 解析、基于目录的章节识别、表格提取和视觉区域渲染
+- PyMuPDF4LLM Layout + PyMuPDF：正文/公式/表格/图注分类，位图与矢量图区域识别及精确渲染
+- FastEmbed：本地多语言语义检索；可靠度评分仍由可审计的确定性规则计算
 - Pydantic v2：结构化输出 Schema 与结果校验
 - 证据片段：为结论提供页码和章节依据（`E` 正文、`T` 表格、`F` 视觉图像摘要）
 - FastAPI：后端 API 与静态文件托管

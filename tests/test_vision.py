@@ -84,7 +84,12 @@ class TestVisionEnrichment(unittest.TestCase):
             full_text="The paper has several visual regions.",
             sections=[Section("Method", "The architecture uses multiple visual components.", 0, 0)],
             figures=[
-                FigureBlock(page=0, caption=f"Figure {index}: Architecture part {index}.", image_index=index)
+                FigureBlock(
+                    page=0,
+                    caption=f"Figure {index}: Architecture part {index}.",
+                    image_index=index,
+                    bbox=(60, 70, 360, 240),
+                )
                 for index in range(1, 4)
             ],
         )
@@ -130,7 +135,12 @@ class TestVisionEnrichment(unittest.TestCase):
             full_text="The paper has several visual regions.",
             sections=[Section("Method", "The architecture uses multiple visual components.", 0, 0)],
             figures=[
-                FigureBlock(page=0, caption=f"Figure {index}: Architecture part {index}.", image_index=index)
+                FigureBlock(
+                    page=0,
+                    caption=f"Figure {index}: Architecture part {index}.",
+                    image_index=index,
+                    bbox=(60, 70, 360, 240),
+                )
                 for index in range(1, 4)
             ],
         )
@@ -149,6 +159,15 @@ class TestVisionEnrichment(unittest.TestCase):
         self.assertEqual(result.enriched, 3)
         self.assertEqual(result.errors, [])
         self.assertTrue(all(figure.visual_summary for figure in paper.figures))
+
+    def test_refuses_unverified_full_page_fallback(self):
+        path = self._pdf()
+        doc = fitz.open(path)
+        try:
+            with self.assertRaisesRegex(ValueError, "no verified layout bounding box"):
+                render_figure_png(doc, FigureBlock(page=0, caption="Figure 1"))
+        finally:
+            doc.close()
 
 
 def _restore_env(name, value):

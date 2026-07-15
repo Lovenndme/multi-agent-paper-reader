@@ -1,5 +1,6 @@
 """PDF parsing and section splitting utilities."""
 
+import json
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
+import pymupdf4llm
 
 
 # ---------------------------------------------------------------------------
@@ -480,48 +482,293 @@ def _extract_tables_and_figures(
     return tables, figures
 
 
+_LAYOUT_BODY_CLASSES = {"section-header", "text", "list-item", "formula", "footnote"}
+
+
+def _extract_layout_content(
+    pdf_path: Path,
+) -> Tuple[List[Tuple[int, str]], List[Section], List[TableBlock], List[FigureBlock]]:
+    """Use PyMuPDF4LLM Layout to classify body, tables, captions and vector figures."""
+    raw = pymupdf4llm.to_json(str(pdf_path))
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    layout_pages = payload.get("pages", []) if isinstance(payload, dict) else []
+    if not layout_pages:
+        raise ValueError("Layout parser returned no pages.")
+
+    pages_text: List[Tuple[int, str]] = []
+    tables: List[TableBlock] = []
+    figures: List[FigureBlock] = []
+    section_events: list[tuple[int, str, str]] = []
+
+    for fallback_page, page_payload in enumerate(layout_pages):
+        page_number = int(page_payload.get("page_number") or fallback_page + 1) - 1
+        page_width = float(page_payload.get("width") or 1.0)
+        page_height = float(page_payload.get("height") or 1.0)
+        boxes = [box for box in page_payload.get("boxes", []) if isinstance(box, dict)]
+        boxes.sort(key=lambda box: (float(box.get("y0") or 0), float(box.get("x0") or 0)))
+
+        page_lines: list[str] = []
+        caption_boxes: list[dict[str, object]] = []
+        picture_boxes: list[dict[str, object]] = []
+        table_boxes: list[dict[str, object]] = []
+        for box in boxes:
+            boxclass = str(box.get("boxclass") or "")
+            text = _layout_box_text(box)
+            is_caption_text = bool(text and (_is_figure_caption(text) or _is_table_caption(text)))
+            if is_caption_text:
+                caption_boxes.append({"bbox": _layout_bbox(box), "text": text})
+            elif boxclass in _LAYOUT_BODY_CLASSES and text:
+                page_lines.append(text)
+                section_events.append((page_number, boxclass, text))
+            if boxclass == "caption" and text and not is_caption_text:
+                caption_boxes.append({"bbox": _layout_bbox(box), "text": text})
+            elif boxclass == "picture":
+                bbox = _layout_bbox(box)
+                if bbox and _bbox_area(bbox) / max(page_width * page_height, 1.0) >= 0.015:
+                    picture_boxes.append({"bbox": bbox, "text": text})
+            elif boxclass == "table" and isinstance(box.get("table"), dict):
+                table_boxes.append(box)
+
+        pages_text.append((page_number, "\n".join(page_lines).strip()))
+
+        table_captions = [item for item in caption_boxes if _is_table_caption(str(item["text"]))]
+        figure_captions = [item for item in caption_boxes if _is_figure_caption(str(item["text"]))]
+        used_table_captions: set[int] = set()
+        used_figure_captions: set[int] = set()
+        for table_box in table_boxes:
+            table_data = table_box.get("table") or {}
+            rows = _clean_table_rows(table_data.get("extract") or [])
+            bbox = _layout_bbox(table_box)
+            caption = _match_layout_caption(
+                bbox,
+                table_captions,
+                used_table_captions,
+                page_height=page_height,
+            )
+            if rows or caption:
+                tables.append(TableBlock(page=page_number, rows=rows, caption=caption))
+
+        for image_index, picture in enumerate(picture_boxes, start=1):
+            bbox = picture["bbox"]
+            caption = _match_layout_caption(
+                bbox,
+                figure_captions,
+                used_figure_captions,
+                page_height=page_height,
+            )
+            figures.append(
+                FigureBlock(
+                    page=page_number,
+                    caption=caption,
+                    image_index=image_index,
+                    bbox=bbox,
+                )
+            )
+
+    pages_text.sort(key=lambda item: item[0])
+    sections = _split_layout_sections(section_events)
+    return pages_text, sections, tables, figures
+
+
+def _split_layout_sections(events: list[tuple[int, str, str]]) -> List[Section]:
+    """Build sections from layout-classified headers without figure-label leakage."""
+    sections: List[Section] = []
+    current_title = "Front matter"
+    current_lines: list[str] = []
+    current_page_start = events[0][0] if events else 0
+    current_page = current_page_start
+
+    for page_number, boxclass, text in events:
+        clean_text = re.sub(r"\s+", " ", text).strip()
+        is_header = boxclass == "section-header" and 1 < len(clean_text) <= 160
+        if is_header:
+            if current_lines:
+                sections.append(
+                    Section(
+                        title=current_title,
+                        content="\n".join(current_lines).strip(),
+                        page_start=current_page_start,
+                        page_end=current_page,
+                    )
+                )
+            current_title = clean_text
+            current_lines = []
+            current_page_start = page_number
+        elif clean_text:
+            current_lines.append(text)
+        current_page = page_number
+    if current_lines:
+        sections.append(
+            Section(
+                title=current_title,
+                content="\n".join(current_lines).strip(),
+                page_start=current_page_start,
+                page_end=current_page,
+            )
+        )
+    return sections
+
+
+def _layout_box_text(box: dict[str, object]) -> str:
+    lines: list[str] = []
+    for line in box.get("textlines") or []:
+        spans = line.get("spans") or []
+        pieces: list[str] = []
+        previous_x1: float | None = None
+        previous_size = 0.0
+        for span in spans:
+            text = str(span.get("text") or "")
+            bbox = span.get("bbox") or [0, 0, 0, 0]
+            x0 = float(bbox[0])
+            if (
+                pieces
+                and previous_x1 is not None
+                and x0 - previous_x1 > max(0.8, previous_size * 0.12)
+                and text
+                and not text.startswith((".", ",", ":", ";", ")", "]", "}", "%"))
+            ):
+                pieces.append(" ")
+            pieces.append(text)
+            previous_x1 = float(bbox[2])
+            previous_size = float(span.get("size") or 0)
+        line_text = "".join(pieces).strip()
+        if line_text:
+            lines.append(line_text)
+    return "\n".join(lines).strip()
+
+
+def _layout_bbox(box: dict[str, object]) -> Optional[Tuple[float, float, float, float]]:
+    values = [box.get("x0"), box.get("y0"), box.get("x1"), box.get("y1")]
+    if any(value is None for value in values):
+        table = box.get("table")
+        values = table.get("bbox", []) if isinstance(table, dict) else []
+    if len(values) != 4:
+        return None
+    try:
+        bbox = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return bbox if bbox[2] > bbox[0] and bbox[3] > bbox[1] else None
+
+
+def _bbox_area(bbox: Tuple[float, float, float, float]) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _is_figure_caption(text: str) -> bool:
+    return bool(re.match(r"^\s*(?:Figure|FIGURE|Fig\.?|图)\s*[\dIVXivx一二三四五六七八九十]+", text))
+
+
+def _is_table_caption(text: str) -> bool:
+    return bool(re.match(r"^\s*(?:Table|TABLE|Tab\.?|表)\s*[\dIVXivx一二三四五六七八九十]+", text))
+
+
+def _match_layout_caption(
+    bbox: Optional[Tuple[float, float, float, float]],
+    captions: list[dict[str, object]],
+    used: set[int],
+    *,
+    page_height: float,
+) -> str:
+    """Pair by same-page geometry instead of unrelated list positions."""
+    if bbox is None:
+        return ""
+    candidates: list[tuple[float, int]] = []
+    for index, caption in enumerate(captions):
+        if index in used or not caption.get("bbox"):
+            continue
+        caption_bbox = caption["bbox"]
+        vertical_gap = (
+            caption_bbox[1] - bbox[3]
+            if caption_bbox[1] >= bbox[3]
+            else bbox[1] - caption_bbox[3]
+            if caption_bbox[3] <= bbox[1]
+            else 0.0
+        )
+        overlap = max(0.0, min(bbox[2], caption_bbox[2]) - max(bbox[0], caption_bbox[0]))
+        width = max(1.0, min(bbox[2] - bbox[0], caption_bbox[2] - caption_bbox[0]))
+        below_bonus = 0.0 if caption_bbox[1] >= bbox[1] else page_height * 0.08
+        cost = max(0.0, vertical_gap) + below_bonus + (1.0 - min(overlap / width, 1.0)) * 30.0
+        if vertical_gap <= page_height * 0.28:
+            candidates.append((cost, index))
+    if not candidates:
+        return ""
+    _, best_index = min(candidates)
+    used.add(best_index)
+    return str(captions[best_index]["text"])
+
+
+def _extract_classic_content(
+    doc: fitz.Document,
+    toc: List[List[object]],
+    *,
+    include_visuals: bool,
+) -> Tuple[List[Tuple[int, str]], List[Section], List[TableBlock], List[FigureBlock]]:
+    """Return the lightweight/fallback PyMuPDF extraction path."""
+    pages_text = [
+        (page_num, page.get_text("text"))
+        for page_num, page in enumerate(doc)
+    ]
+    sections = _split_by_toc(toc, pages_text)
+    if include_visuals:
+        tables, figures = _extract_tables_and_figures(doc, pages_text)
+    else:
+        tables, figures = [], []
+    return pages_text, sections, tables, figures
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
+def parse_pdf(pdf_path: str | Path, *, layout: bool = True) -> ParsedPaper:
     """Extract text from a PDF and split it into sections.
 
     Strategy (best-effort, graceful fallback):
-    1. Try font-size heuristic (works for most formatted PDFs).
-    2. If that yields <3 sections, try regex patterns (English + Chinese).
-    3. If still <2 sections, store full text as one section so agents still work.
+    1. Use PyMuPDF4LLM Layout for body/table/caption/raster/vector regions.
+    2. Fall back to outline, font-size and regex parsing when layout is unavailable.
+    3. ``layout=False`` keeps upload preview lightweight and skips rich evidence extraction.
+    4. If section detection still fails, preserve the full text as one section.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     doc = fitz.open(str(pdf_path))
+    try:
+        meta = doc.metadata or {}
+        metadata_title = re.sub(r"\s+", " ", meta.get("title", "")).strip()
+        normalized_metadata_title = metadata_title.lower().strip(" .:-")
+        generic_titles = {"", "paper", "document", "untitled", pdf_path.stem.lower()}
+        if normalized_metadata_title in generic_titles or normalized_metadata_title.startswith("microsoft word"):
+            paper_title = _infer_title_from_first_page(doc) or pdf_path.stem
+        else:
+            paper_title = metadata_title
+        toc = doc.get_toc(simple=True)
 
-    meta = doc.metadata or {}
-    metadata_title = re.sub(r"\s+", " ", meta.get("title", "")).strip()
-    normalized_metadata_title = metadata_title.lower().strip(" .:-")
-    generic_titles = {"", "paper", "document", "untitled", pdf_path.stem.lower()}
-    if normalized_metadata_title in generic_titles or normalized_metadata_title.startswith("microsoft word"):
-        paper_title = _infer_title_from_first_page(doc) or pdf_path.stem
-    else:
-        paper_title = metadata_title
-    toc = doc.get_toc(simple=True)
+        if layout:
+            parser_backend = "pymupdf4llm-layout"
+            try:
+                pages_text, sections, tables, figures = _extract_layout_content(pdf_path)
+            except Exception:  # layout is preferred; classic parsing remains a safe fallback
+                parser_backend = "pymupdf-classic-fallback"
+                pages_text, sections, tables, figures = _extract_classic_content(
+                    doc,
+                    toc,
+                    include_visuals=True,
+                )
+        else:
+            parser_backend = "pymupdf-classic-preview"
+            pages_text, sections, tables, figures = _extract_classic_content(
+                doc,
+                toc,
+                include_visuals=False,
+            )
 
-    # Plain text per page (for regex fallback and full_text)
-    pages_text: List[Tuple[int, str]] = []
-    for page_num, page in enumerate(doc):
-        pages_text.append((page_num, page.get_text("text")))
-
-    full_text = "\n".join(t for _, t in pages_text)
-    tables, figures = _extract_tables_and_figures(doc, pages_text)
-
-    # --- Strategy 1: embedded outline / bookmarks ---
-    sections = _split_by_toc(toc, pages_text)
-
-    # --- Strategy 2: font-size heuristic ---
-    rows = _extract_blocks_with_fontsize(doc)
-    doc.close()
+        full_text = "\n".join(text for _, text in pages_text)
+        rows = _extract_blocks_with_fontsize(doc)
+    finally:
+        doc.close()
 
     if len(sections) < 3:
         body_size = _detect_body_fontsize(rows)
@@ -540,11 +787,13 @@ def parse_pdf(pdf_path: str | Path) -> ParsedPaper:
             page_end=len(pages_text) - 1,
         )]
 
+    clean_metadata = {k: str(v) for k, v in meta.items() if v}
+    clean_metadata["parser_backend"] = parser_backend
     return ParsedPaper(
         title=paper_title,
         full_text=full_text,
         sections=sections,
         tables=tables,
         figures=figures,
-        metadata={k: str(v) for k, v in meta.items() if v},
+        metadata=clean_metadata,
     )

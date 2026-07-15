@@ -1030,7 +1030,6 @@ function PaperChatDrawer({
                   onClick={() => void copyAssistantMessage(message)}
                 >
                   {copiedMessageId === message.id ? <IconCheck size={15} stroke={2} /> : <IconCopy size={15} stroke={1.8} />}
-                  <span>{copiedMessageId === message.id ? "已复制" : "复制"}</span>
                 </button>
               </div>
             )}
@@ -1198,7 +1197,7 @@ function SettingsDialog({
             <div className="settings-meta-row">
               <div>
                 <small>项目版本</small>
-                <strong>{status.version || "V1.3.3"}</strong>
+                <strong>{status.version || "—"}</strong>
               </div>
               <div>
                 <small>模型服务</small>
