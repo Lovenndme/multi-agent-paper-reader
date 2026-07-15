@@ -143,6 +143,7 @@ class TestLayoutExtraction(unittest.TestCase):
 
         self.assertEqual(tables, [])
         self.assertEqual(figures[0].bbox, (100.0, 80.0, 500.0, 330.0))
+        self.assertEqual(figures[0].caption_bbox, (100.0, 340.0, 500.0, 370.0))
         self.assertIn("Figure 2", figures[0].caption)
         self.assertNotIn("Transformer Block", pages[0][1])
         self.assertNotIn("Figure 2", pages[0][1])
@@ -199,6 +200,7 @@ class TestLayoutExtraction(unittest.TestCase):
 
         self.assertEqual(len(figures), 1)
         self.assertEqual(figures[0].bbox, (90.0, 90.0, 510.0, 310.0))
+        self.assertEqual(figures[0].caption_bbox, (80.0, 325.0, 520.0, 350.0))
         self.assertIn("Left and right", figures[0].caption)
 
     def test_keeps_pictures_with_distinct_captions_separate(self):

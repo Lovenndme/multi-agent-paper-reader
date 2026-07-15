@@ -11,7 +11,7 @@ from typing import Callable
 
 import fitz
 
-from core.pdf_parser import FigureBlock, ParsedPaper
+from core.pdf_parser import FigureBlock, ParsedPaper, TableBlock
 from utils.llm import invoke_vision_image_summary, is_vision_configured
 
 
@@ -114,8 +114,28 @@ def render_figure_png(
     scale = max(72, dpi) / 72
     matrix = fitz.Matrix(scale, scale)
 
-    clip = _expanded_clip(page, figure.bbox)
+    clip = _figure_clip(page, figure)
     pixmap = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
+    return pixmap.tobytes("png")
+
+
+def render_table_png(
+    doc: fitz.Document,
+    table: TableBlock,
+    *,
+    dpi: int | None = None,
+) -> bytes:
+    """Render one verified table together with its complete matched caption."""
+    if table.page < 0 or table.page >= doc.page_count:
+        raise ValueError(f"Table page out of range: {table.page + 1}")
+    if table.bbox is None:
+        raise ValueError("Table has no verified layout bounding box; refusing full-page fallback.")
+
+    page = doc[table.page]
+    dpi = dpi or int(os.environ.get("VISION_RENDER_DPI", "144"))
+    scale = max(72, dpi) / 72
+    clip = _table_clip(page, table)
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
     return pixmap.tobytes("png")
 
 
@@ -218,7 +238,7 @@ def _expanded_clip(
     page: fitz.Page,
     bbox: tuple[float, float, float, float] | None,
     *,
-    margin: float = 36.0,
+    margin: float,
 ) -> fitz.Rect | None:
     if not bbox:
         return None
@@ -230,6 +250,43 @@ def _expanded_clip(
     if rect.is_empty or rect.width < 20 or rect.height < 20:
         return None
     return rect
+
+
+def _figure_clip(page: fitz.Page, figure: FigureBlock) -> fitz.Rect:
+    """Build a clean crop containing the complete visual and matched caption.
+
+    Layout picture boxes can omit outer vector labels and strokes, so captioned
+    figures retain a larger safety margin around the visual. The caption itself is
+    included from its exact layout bbox with only a small text margin. Captionless
+    figures use a tight margin to avoid pulling nearby body text into the crop.
+    """
+    if figure.bbox is None:
+        raise ValueError("Figure has no verified layout bounding box; refusing full-page fallback.")
+
+    picture_margin = 36.0 if figure.caption_bbox is not None else 8.0
+    clip = _expanded_clip(page, figure.bbox, margin=picture_margin)
+    if clip is None:
+        raise ValueError("Figure layout bounding box is too small to render.")
+
+    if figure.caption_bbox is not None:
+        caption_clip = _expanded_clip(page, figure.caption_bbox, margin=4.0)
+        if caption_clip is not None:
+            clip.include_rect(caption_clip)
+    return clip
+
+
+def _table_clip(page: fitz.Page, table: TableBlock) -> fitz.Rect:
+    """Build a tight table crop that includes the complete matched caption."""
+    if table.bbox is None:
+        raise ValueError("Table has no verified layout bounding box; refusing full-page fallback.")
+    clip = _expanded_clip(page, table.bbox, margin=4.0)
+    if clip is None:
+        raise ValueError("Table layout bounding box is too small to render.")
+    if table.caption_bbox is not None:
+        caption_clip = _expanded_clip(page, table.caption_bbox, margin=4.0)
+        if caption_clip is not None:
+            clip.include_rect(caption_clip)
+    return clip
 
 
 def _vision_prompt_for_figure(paper: ParsedPaper, figure: FigureBlock) -> str:

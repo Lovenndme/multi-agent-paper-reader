@@ -95,6 +95,8 @@ class TableBlock:
     page: int
     rows: List[List[str]]
     caption: str = ""
+    bbox: Optional[Tuple[float, float, float, float]] = None
+    caption_bbox: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -103,6 +105,7 @@ class FigureBlock:
     caption: str = ""
     image_index: int = 0
     bbox: Optional[Tuple[float, float, float, float]] = None
+    caption_bbox: Optional[Tuple[float, float, float, float]] = None
     visual_summary: str = ""
 
 
@@ -538,27 +541,36 @@ def _extract_layout_content(
             table_data = table_box.get("table") or {}
             rows = _clean_table_rows(table_data.get("extract") or [])
             bbox = _layout_bbox(table_box)
-            caption = _match_layout_caption(
+            caption, caption_bbox = _match_layout_caption(
                 bbox,
                 table_captions,
                 used_table_captions,
                 page_height=page_height,
             )
             if rows or caption:
-                tables.append(TableBlock(page=page_number, rows=rows, caption=caption))
+                tables.append(
+                    TableBlock(
+                        page=page_number,
+                        rows=rows,
+                        caption=caption,
+                        bbox=bbox,
+                        caption_bbox=caption_bbox,
+                    )
+                )
 
         grouped_pictures = _group_layout_pictures(
             picture_boxes,
             figure_captions,
             page_height=page_height,
         )
-        for image_index, (bbox, caption) in enumerate(grouped_pictures, start=1):
+        for image_index, (bbox, caption, caption_bbox) in enumerate(grouped_pictures, start=1):
             figures.append(
                 FigureBlock(
                     page=page_number,
                     caption=caption,
                     image_index=image_index,
                     bbox=bbox,
+                    caption_bbox=caption_bbox,
                 )
             )
 
@@ -666,10 +678,10 @@ def _match_layout_caption(
     used: set[int],
     *,
     page_height: float,
-) -> str:
+) -> tuple[str, Optional[Tuple[float, float, float, float]]]:
     """Pair by same-page geometry instead of unrelated list positions."""
     if bbox is None:
-        return ""
+        return "", None
     candidates: list[tuple[float, int]] = []
     for index, caption in enumerate(captions):
         if index in used or not caption.get("bbox"):
@@ -678,10 +690,13 @@ def _match_layout_caption(
         if cost is not None:
             candidates.append((cost, index))
     if not candidates:
-        return ""
+        return "", None
     _, best_index = min(candidates)
     used.add(best_index)
-    return str(captions[best_index]["text"])
+    caption_bbox = captions[best_index].get("bbox")
+    if not isinstance(caption_bbox, tuple) or len(caption_bbox) != 4:
+        caption_bbox = None
+    return str(captions[best_index]["text"]), caption_bbox
 
 
 def _layout_caption_cost(
@@ -717,7 +732,13 @@ def _group_layout_pictures(
     captions: list[dict[str, object]],
     *,
     page_height: float,
-) -> list[tuple[Tuple[float, float, float, float], str]]:
+) -> list[
+    tuple[
+        Tuple[float, float, float, float],
+        str,
+        Optional[Tuple[float, float, float, float]],
+    ]
+]:
     """Merge split subpictures that geometrically belong to the same caption.
 
     Layout commonly emits one ``picture`` box per panel or vector component. Treating
@@ -750,7 +771,13 @@ def _group_layout_pictures(
         else:
             uncaptioned.append(bbox)
 
-    results: list[tuple[Tuple[float, float, float, float], str]] = []
+    results: list[
+        tuple[
+            Tuple[float, float, float, float],
+            str,
+            Optional[Tuple[float, float, float, float]],
+        ]
+    ] = []
     for caption_index, boxes in grouped.items():
         union = (
             min(box[0] for box in boxes),
@@ -758,8 +785,17 @@ def _group_layout_pictures(
             max(box[2] for box in boxes),
             max(box[3] for box in boxes),
         )
-        results.append((union, str(captions[caption_index].get("text") or "")))
-    results.extend((bbox, "") for bbox in uncaptioned)
+        caption_bbox = captions[caption_index].get("bbox")
+        if not isinstance(caption_bbox, tuple) or len(caption_bbox) != 4:
+            caption_bbox = None
+        results.append(
+            (
+                union,
+                str(captions[caption_index].get("text") or ""),
+                caption_bbox,
+            )
+        )
+    results.extend((bbox, "", None) for bbox in uncaptioned)
     results.sort(key=lambda item: (item[0][1], item[0][0]))
     return results
 

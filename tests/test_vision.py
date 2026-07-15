@@ -9,8 +9,14 @@ from pathlib import Path
 import fitz
 
 from core.evidence import build_evidence_index, evidence_context_for_agent
-from core.pdf_parser import FigureBlock, ParsedPaper, Section
-from core.vision import enrich_paper_figures_with_vision, render_figure_png
+from core.pdf_parser import FigureBlock, ParsedPaper, Section, TableBlock
+from core.vision import (
+    _figure_clip,
+    _table_clip,
+    enrich_paper_figures_with_vision,
+    render_figure_png,
+    render_table_png,
+)
 
 
 class TestVisionEnrichment(unittest.TestCase):
@@ -41,6 +47,56 @@ class TestVisionEnrichment(unittest.TestCase):
 
         self.assertTrue(image.startswith(b"\x89PNG"))
         self.assertGreater(len(image), 1000)
+
+    def test_captioned_clip_includes_complete_caption_bbox(self):
+        path = self._pdf()
+        doc = fitz.open(path)
+        try:
+            clip = _figure_clip(
+                doc[0],
+                FigureBlock(
+                    page=0,
+                    caption="Figure 1: Model architecture overview.",
+                    bbox=(60, 70, 360, 200),
+                    caption_bbox=(40, 220, 380, 240),
+                ),
+            )
+        finally:
+            doc.close()
+
+        self.assertEqual(tuple(clip), (24.0, 34.0, 396.0, 244.0))
+
+    def test_captionless_clip_uses_tight_margin(self):
+        path = self._pdf()
+        doc = fitz.open(path)
+        try:
+            clip = _figure_clip(
+                doc[0],
+                FigureBlock(page=0, bbox=(60, 70, 360, 240)),
+            )
+        finally:
+            doc.close()
+
+        self.assertEqual(tuple(clip), (52.0, 62.0, 368.0, 248.0))
+
+    def test_table_clip_includes_complete_caption_bbox(self):
+        path = self._pdf()
+        doc = fitz.open(path)
+        try:
+            table = TableBlock(
+                page=0,
+                rows=[["Metric", "Score"], ["Accuracy", "0.95"]],
+                caption="Table 1: Complete results.",
+                bbox=(60, 90, 360, 240),
+                caption_bbox=(40, 50, 380, 75),
+            )
+            clip = _table_clip(doc[0], table)
+            image = render_table_png(doc, table, dpi=96)
+        finally:
+            doc.close()
+
+        self.assertEqual(tuple(clip), (36.0, 46.0, 384.0, 244.0))
+        self.assertTrue(image.startswith(b"\x89PNG"))
 
     def test_enriches_figure_and_evidence_context(self):
         path = self._pdf()
