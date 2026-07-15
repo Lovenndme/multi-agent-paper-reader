@@ -148,6 +148,165 @@ class TestLayoutExtraction(unittest.TestCase):
         self.assertNotIn("Figure 2", pages[0][1])
         self.assertIn("body explains", sections[0].content)
 
+    def test_merges_subpictures_that_share_one_caption(self):
+        payload = {
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width": 600,
+                    "height": 800,
+                    "boxes": [
+                        {
+                            "x0": 90,
+                            "y0": 100,
+                            "x1": 260,
+                            "y1": 300,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 340,
+                            "y0": 90,
+                            "x1": 510,
+                            "y1": 310,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 80,
+                            "y0": 325,
+                            "x1": 520,
+                            "y1": 350,
+                            "boxclass": "caption",
+                            "textlines": [
+                                {
+                                    "spans": [
+                                        {
+                                            "text": "Figure 2: Left and right model components.",
+                                            "bbox": [80, 325, 420, 340],
+                                            "size": 10,
+                                        }
+                                    ]
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        with patch("core.pdf_parser.pymupdf4llm.to_json", return_value=json.dumps(payload)):
+            _, _, _, figures = _extract_layout_content(Path("multi-panel.pdf"))
+
+        self.assertEqual(len(figures), 1)
+        self.assertEqual(figures[0].bbox, (90.0, 90.0, 510.0, 310.0))
+        self.assertIn("Left and right", figures[0].caption)
+
+    def test_keeps_pictures_with_distinct_captions_separate(self):
+        payload = {
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width": 600,
+                    "height": 800,
+                    "boxes": [
+                        {
+                            "x0": 60,
+                            "y0": 100,
+                            "x1": 260,
+                            "y1": 300,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 340,
+                            "y0": 100,
+                            "x1": 540,
+                            "y1": 300,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 60,
+                            "y0": 315,
+                            "x1": 260,
+                            "y1": 340,
+                            "boxclass": "caption",
+                            "textlines": [
+                                {"spans": [{"text": "Figure 1: Left result.", "bbox": [60, 315, 220, 330], "size": 10}]}
+                            ],
+                        },
+                        {
+                            "x0": 340,
+                            "y0": 315,
+                            "x1": 540,
+                            "y1": 340,
+                            "boxclass": "caption",
+                            "textlines": [
+                                {"spans": [{"text": "Figure 2: Right result.", "bbox": [340, 315, 510, 330], "size": 10}]}
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        with patch("core.pdf_parser.pymupdf4llm.to_json", return_value=json.dumps(payload)):
+            _, _, _, figures = _extract_layout_content(Path("two-figures.pdf"))
+
+        self.assertEqual(len(figures), 2)
+        self.assertEqual([figure.bbox for figure in figures], [
+            (60.0, 100.0, 260.0, 300.0),
+            (340.0, 100.0, 540.0, 300.0),
+        ])
+        self.assertEqual([figure.caption for figure in figures], [
+            "Figure 1: Left result.",
+            "Figure 2: Right result.",
+        ])
+
+    def test_keeps_nearby_captionless_picture_separate(self):
+        payload = {
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width": 600,
+                    "height": 800,
+                    "boxes": [
+                        {
+                            "x0": 60,
+                            "y0": 100,
+                            "x1": 250,
+                            "y1": 300,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 350,
+                            "y0": 100,
+                            "x1": 540,
+                            "y1": 300,
+                            "boxclass": "picture",
+                            "textlines": [],
+                        },
+                        {
+                            "x0": 60,
+                            "y0": 315,
+                            "x1": 250,
+                            "y1": 340,
+                            "boxclass": "caption",
+                            "textlines": [
+                                {"spans": [{"text": "Figure 1: Left result.", "bbox": [60, 315, 220, 330], "size": 10}]}
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        with patch("core.pdf_parser.pymupdf4llm.to_json", return_value=json.dumps(payload)):
+            _, _, _, figures = _extract_layout_content(Path("one-caption.pdf"))
+
+        self.assertEqual(len(figures), 2)
+        self.assertEqual(figures[0].caption, "Figure 1: Left result.")
+        self.assertEqual(figures[1].caption, "")
+
 
 class TestParsedPaperSectionRouting(unittest.TestCase):
     def _make_paper(self):

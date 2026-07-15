@@ -534,7 +534,6 @@ def _extract_layout_content(
         table_captions = [item for item in caption_boxes if _is_table_caption(str(item["text"]))]
         figure_captions = [item for item in caption_boxes if _is_figure_caption(str(item["text"]))]
         used_table_captions: set[int] = set()
-        used_figure_captions: set[int] = set()
         for table_box in table_boxes:
             table_data = table_box.get("table") or {}
             rows = _clean_table_rows(table_data.get("extract") or [])
@@ -548,14 +547,12 @@ def _extract_layout_content(
             if rows or caption:
                 tables.append(TableBlock(page=page_number, rows=rows, caption=caption))
 
-        for image_index, picture in enumerate(picture_boxes, start=1):
-            bbox = picture["bbox"]
-            caption = _match_layout_caption(
-                bbox,
-                figure_captions,
-                used_figure_captions,
-                page_height=page_height,
-            )
+        grouped_pictures = _group_layout_pictures(
+            picture_boxes,
+            figure_captions,
+            page_height=page_height,
+        )
+        for image_index, (bbox, caption) in enumerate(grouped_pictures, start=1):
             figures.append(
                 FigureBlock(
                     page=page_number,
@@ -677,25 +674,94 @@ def _match_layout_caption(
     for index, caption in enumerate(captions):
         if index in used or not caption.get("bbox"):
             continue
-        caption_bbox = caption["bbox"]
-        vertical_gap = (
-            caption_bbox[1] - bbox[3]
-            if caption_bbox[1] >= bbox[3]
-            else bbox[1] - caption_bbox[3]
-            if caption_bbox[3] <= bbox[1]
-            else 0.0
-        )
-        overlap = max(0.0, min(bbox[2], caption_bbox[2]) - max(bbox[0], caption_bbox[0]))
-        width = max(1.0, min(bbox[2] - bbox[0], caption_bbox[2] - caption_bbox[0]))
-        below_bonus = 0.0 if caption_bbox[1] >= bbox[1] else page_height * 0.08
-        cost = max(0.0, vertical_gap) + below_bonus + (1.0 - min(overlap / width, 1.0)) * 30.0
-        if vertical_gap <= page_height * 0.28:
+        cost = _layout_caption_cost(bbox, caption["bbox"], page_height=page_height)
+        if cost is not None:
             candidates.append((cost, index))
     if not candidates:
         return ""
     _, best_index = min(candidates)
     used.add(best_index)
     return str(captions[best_index]["text"])
+
+
+def _layout_caption_cost(
+    bbox: Tuple[float, float, float, float],
+    caption_bbox: object,
+    *,
+    page_height: float,
+    max_vertical_gap_ratio: float = 0.28,
+    require_horizontal_overlap: bool = False,
+) -> float | None:
+    """Score a same-page visual/caption pair, rejecting distant candidates."""
+    if not isinstance(caption_bbox, tuple) or len(caption_bbox) != 4:
+        return None
+    vertical_gap = (
+        caption_bbox[1] - bbox[3]
+        if caption_bbox[1] >= bbox[3]
+        else bbox[1] - caption_bbox[3]
+        if caption_bbox[3] <= bbox[1]
+        else 0.0
+    )
+    if vertical_gap > page_height * max_vertical_gap_ratio:
+        return None
+    overlap = max(0.0, min(bbox[2], caption_bbox[2]) - max(bbox[0], caption_bbox[0]))
+    if require_horizontal_overlap and overlap <= 0:
+        return None
+    width = max(1.0, min(bbox[2] - bbox[0], caption_bbox[2] - caption_bbox[0]))
+    above_penalty = 0.0 if caption_bbox[1] >= bbox[1] else page_height * 0.08
+    return max(0.0, vertical_gap) + above_penalty + (1.0 - min(overlap / width, 1.0)) * 30.0
+
+
+def _group_layout_pictures(
+    pictures: list[dict[str, object]],
+    captions: list[dict[str, object]],
+    *,
+    page_height: float,
+) -> list[tuple[Tuple[float, float, float, float], str]]:
+    """Merge split subpictures that geometrically belong to the same caption.
+
+    Layout commonly emits one ``picture`` box per panel or vector component. Treating
+    those boxes as separate figures sends incomplete crops to the vision model. Each
+    picture is therefore assigned to its nearest plausible caption, and boxes sharing
+    that caption are rendered as their bounded union. Captionless regions remain
+    independent so unrelated visuals are not merged by list position.
+    """
+    grouped: dict[int, list[Tuple[float, float, float, float]]] = {}
+    uncaptioned: list[Tuple[float, float, float, float]] = []
+
+    for picture in pictures:
+        bbox = picture.get("bbox")
+        if not isinstance(bbox, tuple) or len(bbox) != 4:
+            continue
+        candidates: list[tuple[float, int]] = []
+        for caption_index, caption in enumerate(captions):
+            cost = _layout_caption_cost(
+                bbox,
+                caption.get("bbox"),
+                page_height=page_height,
+                max_vertical_gap_ratio=0.12,
+                require_horizontal_overlap=True,
+            )
+            if cost is not None:
+                candidates.append((cost, caption_index))
+        if candidates:
+            _, caption_index = min(candidates)
+            grouped.setdefault(caption_index, []).append(bbox)
+        else:
+            uncaptioned.append(bbox)
+
+    results: list[tuple[Tuple[float, float, float, float], str]] = []
+    for caption_index, boxes in grouped.items():
+        union = (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+        results.append((union, str(captions[caption_index].get("text") or "")))
+    results.extend((bbox, "") for bbox in uncaptioned)
+    results.sort(key=lambda item: (item[0][1], item[0][0]))
+    return results
 
 
 def _extract_classic_content(
