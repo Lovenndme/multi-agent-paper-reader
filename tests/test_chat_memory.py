@@ -136,7 +136,10 @@ class TestChatMemory(unittest.TestCase):
         add_conversation_message(conversation["id"], role="assistant", content="明白。")
         self.assertTrue(memory_refresh_needed(conversation["id"]))
 
-        with patch("core.chat_memory.create_memory_store_manager", return_value=_FakeManager(fail=True)):
+        with (
+            patch("core.chat_memory.get_chat_llm", return_value=object()),
+            patch("core.chat_memory.create_memory_store_manager", return_value=_FakeManager(fail=True)),
+        ):
             self.assertEqual(refresh_conversation_memory(conversation["id"]), 0)
         self.assertEqual(load_conversation(conversation["id"])["conversation"]["memory_message_count"], 0)
 
@@ -146,9 +149,12 @@ class TestChatMemory(unittest.TestCase):
             content="章节标题优先保留论文原文。",
             context="避免技术术语翻译失真。",
         )
-        with patch(
-            "core.chat_memory.create_memory_store_manager",
-            return_value=_FakeManager(memory=durable),
+        with (
+            patch("core.chat_memory.get_chat_llm", return_value=object()),
+            patch(
+                "core.chat_memory.create_memory_store_manager",
+                return_value=_FakeManager(memory=durable),
+            ),
         ):
             self.assertEqual(refresh_conversation_memory(conversation["id"]), 2)
 

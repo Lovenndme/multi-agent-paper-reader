@@ -357,27 +357,27 @@ def refresh_conversation_memory(
     if conversation is None:
         return 0
     history_id = str(conversation["paper_history_id"])
-    llm = (
-        get_chat_llm_for_route(text_provider, text_model, text_mode or "")
-        if text_provider and text_model
-        else get_chat_llm()
-    )
-    manager = create_memory_store_manager(
-        llm,
-        schemas=[PaperReaderMemory],
-        instructions=_LANGMEM_INSTRUCTIONS,
-        enable_inserts=True,
-        enable_deletes=True,
-        query_limit=6,
-        namespace=("paper-reader", "{paper_history_id}"),
-        store=get_langmem_store(),
-    )
     config = {"configurable": {"paper_history_id": history_id}}
     messages = [
         {"role": item["role"], "content": item["content"]}
         for item in batch
     ]
     try:
+        llm = (
+            get_chat_llm_for_route(text_provider, text_model, text_mode or "")
+            if text_provider and text_model
+            else get_chat_llm()
+        )
+        manager = create_memory_store_manager(
+            llm,
+            schemas=[PaperReaderMemory],
+            instructions=_LANGMEM_INSTRUCTIONS,
+            enable_inserts=True,
+            enable_deletes=True,
+            query_limit=6,
+            namespace=("paper-reader", "{paper_history_id}"),
+            store=get_langmem_store(),
+        )
         manager.invoke({"messages": messages}, config=config)
     except Exception as exc:  # keep the cursor unchanged so the next turn retries
         LOGGER.warning("LangMem update failed for conversation %s: %s", conversation_id, exc)
