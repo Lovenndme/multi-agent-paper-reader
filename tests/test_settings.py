@@ -6,8 +6,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+from core.codex_sdk import CodexModelInfo
 from core.model_providers import PROVIDERS
 from core.settings import (
     ApiKeySettingsRequest,
@@ -24,6 +26,27 @@ from core.settings import (
 
 
 class TestApplicationSettings(unittest.TestCase):
+    def setUp(self):
+        self.codex_service = SimpleNamespace(
+            status=MagicMock(
+                return_value={
+                    "installed": True,
+                    "runtime_ready": True,
+                    "authenticated": False,
+                    "auth_mode": None,
+                    "plan_type": None,
+                    "message": "本机 Codex 尚未登录 ChatGPT。",
+                }
+            ),
+            models=MagicMock(return_value=()),
+        )
+        self.codex_service_patch = patch(
+            "core.codex_sdk.get_codex_sdk_service",
+            return_value=self.codex_service,
+        )
+        self.codex_service_patch.start()
+        self.addCleanup(self.codex_service_patch.stop)
+
     def test_public_payload_never_contains_secret_material(self):
         with patch.dict(
             os.environ,
@@ -37,9 +60,149 @@ class TestApplicationSettings(unittest.TestCase):
         self.assertEqual(payload["routing"]["text"]["model_label"], "GLM-5.2")
         self.assertEqual(
             {provider["id"] for provider in payload["providers"]},
-            {"zhipu", "deepseek", "openai", "qwen", "doubao", "anthropic", "kimi", "custom"},
+            {
+                "zhipu",
+                "deepseek",
+                "openai",
+                "qwen",
+                "doubao",
+                "anthropic",
+                "kimi",
+                "codex",
+                "custom",
+            },
         )
         self.assertNotIn("secret-test-value", repr(payload))
+
+    def test_codex_payload_uses_live_models_without_account_identity(self):
+        model = CodexModelInfo(
+            id="gpt-test",
+            label="GPT Test",
+            description="Account model",
+            recommended=True,
+            supports_image=True,
+            default_effort="medium",
+            efforts=(("medium", "Balanced"), ("high", "Deeper")),
+        )
+        self.codex_service.status.return_value = {
+            "installed": True,
+            "runtime_ready": True,
+            "authenticated": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "plus",
+            "message": "已连接本机 Codex 订阅。",
+        }
+        self.codex_service.models.return_value = (model,)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "codex",
+                "MODEL_NAME": "gpt-test",
+                "MODEL_MODE": "medium",
+            },
+            clear=True,
+        ):
+            payload = application_settings_payload()
+
+        provider = next(item for item in payload["providers"] if item["id"] == "codex")
+        self.assertTrue(provider["configured"])
+        self.assertEqual(provider["credential_type"], "codex_login")
+        self.assertTrue(provider["local_only"])
+        self.assertEqual([item["id"] for item in provider["text_models"]], ["gpt-test"])
+        self.assertEqual(provider["text_models"][0]["default_mode"], "medium")
+        self.assertEqual(payload["routing"]["vision"]["model"], "gpt-test")
+        self.assertNotIn("email", repr(payload).lower())
+        self.assertNotIn("token", repr(payload).lower())
+
+    def test_codex_route_persists_only_route_metadata(self):
+        model = CodexModelInfo(
+            id="gpt-test",
+            label="GPT Test",
+            description="Account model",
+            recommended=True,
+            supports_image=True,
+            default_effort="medium",
+            efforts=(("medium", "Balanced"), ("high", "Deeper")),
+        )
+        self.codex_service.status.return_value = {
+            "runtime_ready": True,
+            "authenticated": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "plus",
+        }
+        self.codex_service.models.return_value = (model,)
+        request = ModelRoutingSettingsRequest(
+            text_provider="codex",
+            text_model="gpt-test",
+            text_mode="high",
+            vision_enabled=True,
+            vision_provider="codex",
+            vision_model="gpt-test",
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            env_path = Path(tempdir) / ".env"
+            with patch.dict(os.environ, {}, clear=True):
+                payload = configure_model_routing(request, env_path=env_path)
+            saved = env_path.read_text()
+
+        self.assertIn("TEXT_PROVIDER='codex'", saved)
+        self.assertIn("MODEL_NAME='gpt-test'", saved)
+        self.assertIn("MODEL_MODE='high'", saved)
+        self.assertNotIn("API_KEY", saved)
+        self.assertNotIn("TOKEN", saved)
+        self.assertEqual(payload["routing"]["text"]["provider"], "codex")
+
+    def test_codex_never_falls_back_when_live_catalog_is_empty(self):
+        self.codex_service.status.return_value = {
+            "installed": True,
+            "runtime_ready": True,
+            "authenticated": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "plus",
+            "model_catalog_ready": True,
+            "model_catalog_status": "empty",
+            "message": "已连接本机 Codex 订阅。",
+        }
+        self.codex_service.models.return_value = ()
+
+        with patch.dict(
+            os.environ,
+            {
+                "TEXT_PROVIDER": "codex",
+                "MODEL_NAME": "gpt-5.6-sol",
+                "MODEL_MODE": "ultra",
+            },
+            clear=True,
+        ):
+            payload = application_settings_payload()
+            with self.assertRaisesRegex(ModelRoutingValidationError, "不支持文本模型"):
+                configure_model_routing(
+                    ModelRoutingSettingsRequest(
+                        text_provider="codex",
+                        text_model="gpt-5.6-sol",
+                        text_mode="ultra",
+                    ),
+                    env_path=Path(tempfile.gettempdir()) / "must-not-be-written.env",
+                )
+
+        provider = next(item for item in payload["providers"] if item["id"] == "codex")
+        self.assertEqual(provider["text_models"], [])
+        self.assertIsNone(provider["default_text_model"])
+        self.assertEqual(payload["routing"]["text"]["model"], "")
+
+    def test_codex_provider_rejects_api_key_persistence(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            env_path = Path(tempdir) / ".env"
+            with self.assertRaisesRegex(ApiKeyValidationError, "不使用 API Key"):
+                configure_provider_api_key(
+                    "codex",
+                    "must-not-be-saved",
+                    env_path=env_path,
+                )
+
+            self.assertFalse(env_path.exists())
 
     def test_request_representation_masks_api_key(self):
         request = ApiKeySettingsRequest(api_key="secret-test-value")

@@ -340,6 +340,9 @@ def add_comparison_message(
         "sequence": sequence,
         "created_at": now,
         "model_trace": dict(model_trace) if model_trace else None,
+        "external_sources": (
+            list(model_trace.get("external_sources") or []) if model_trace else []
+        ),
         "title_generation_eligible": title_generation_eligible,
         "provisional_title": title if title_generation_eligible else None,
     }
@@ -530,6 +533,9 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
         "sequence": int(row["sequence"]),
         "created_at": str(row["created_at"]),
         "model_trace": model_trace,
+        "external_sources": (
+            list(model_trace.get("external_sources") or []) if isinstance(model_trace, dict) else []
+        ),
     }
 
 

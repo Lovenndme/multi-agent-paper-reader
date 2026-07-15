@@ -20,6 +20,7 @@ import {
 } from "@tabler/icons-react";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
 import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
+import { ExternalSourcesPanel } from "./ExternalSourcesPanel.jsx";
 import { ModelCallTrace } from "./ModelCallTrace.jsx";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
@@ -526,6 +527,7 @@ export function ComparisonWorkspace({
               ...message,
               content: answer,
               model_trace: complete.model_trace || null,
+              external_sources: complete.external_sources || [],
             }
             : message
       )));
@@ -1022,6 +1024,7 @@ function ComparisonChatDrawer({
                 </Suspense>
               ) : <p>{message.content}</p>
             ) : <span className="chat-typing"><i /><i /><i /></span>}
+            {message.role === "assistant" && !message.error && <ExternalSourcesPanel message={message} />}
             {message.role === "assistant" && <ModelCallTrace trace={message.model_trace} />}
           </article>
         ))}

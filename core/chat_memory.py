@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from langmem import create_memory_store_manager
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from core.conversation_titles import generate_conversation_title, local_conversation_title
@@ -23,8 +25,9 @@ from core.langmem_store import (
     ensure_langmem_schema,
     get_langmem_store,
     list_langmem_memories,
+    memory_namespace,
 )
-from utils.llm import get_chat_llm, get_chat_llm_for_route
+from utils.llm import CodexChatModel, get_chat_llm, get_chat_llm_for_route
 
 
 RECENT_MESSAGE_COUNT = 12
@@ -61,6 +64,13 @@ class ConversationCreateRequest(BaseModel):
 
 class ConversationUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=80)
+
+
+class CodexMemoryUpdate(BaseModel):
+    """Structured memory mutations returned by a tool-free Codex turn."""
+
+    upserts: list[PaperReaderMemory] = Field(default_factory=list, max_length=8)
+    delete_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
 @dataclass(frozen=True)
@@ -270,6 +280,9 @@ def add_conversation_message(
         "sequence": sequence,
         "created_at": now,
         "model_trace": dict(model_trace) if model_trace else None,
+        "external_sources": (
+            list(model_trace.get("external_sources") or []) if model_trace else []
+        ),
         "title_generation_eligible": title_generation_eligible,
         "provisional_title": title if title_generation_eligible else None,
     }
@@ -368,17 +381,20 @@ def refresh_conversation_memory(
             if text_provider and text_model
             else get_chat_llm()
         )
-        manager = create_memory_store_manager(
-            llm,
-            schemas=[PaperReaderMemory],
-            instructions=_LANGMEM_INSTRUCTIONS,
-            enable_inserts=True,
-            enable_deletes=True,
-            query_limit=6,
-            namespace=("paper-reader", "{paper_history_id}"),
-            store=get_langmem_store(),
-        )
-        manager.invoke({"messages": messages}, config=config)
+        if isinstance(llm, CodexChatModel):
+            _apply_codex_memory_update(history_id, messages, llm)
+        else:
+            manager = create_memory_store_manager(
+                llm,
+                schemas=[PaperReaderMemory],
+                instructions=_LANGMEM_INSTRUCTIONS,
+                enable_inserts=True,
+                enable_deletes=True,
+                query_limit=6,
+                namespace=("paper-reader", "{paper_history_id}"),
+                store=get_langmem_store(),
+            )
+            manager.invoke({"messages": messages}, config=config)
     except Exception as exc:  # keep the cursor unchanged so the next turn retries
         LOGGER.warning("LangMem update failed for conversation %s: %s", conversation_id, exc)
         return 0
@@ -394,6 +410,57 @@ def refresh_conversation_memory(
             (end_sequence, end_sequence, _utc_now(), conversation_id),
         )
     return len(batch)
+
+
+def _apply_codex_memory_update(
+    history_id: str,
+    messages: list[dict[str, str]],
+    llm: CodexChatModel,
+) -> None:
+    """Use Codex JSON Schema output instead of LangMem tool calls."""
+    existing = list_langmem_memories(
+        history_id,
+        query=None,
+        limit=20,
+        min_score=-1.0,
+    )
+    prompt = (
+        f"{_LANGMEM_INSTRUCTIONS}\n\n"
+        "Return memory mutations only. Put new or corrected durable memories in upserts. "
+        "When the user explicitly forgets or corrects an existing memory, include only the "
+        "matching existing id in delete_ids. Never invent ids and never store paper facts that "
+        "can be retrieved from the paper itself.\n\n"
+        f"Existing memories:\n{json.dumps(existing, ensure_ascii=False)}\n\n"
+        f"New conversation turns:\n{json.dumps(messages, ensure_ascii=False)}"
+    )
+    update = llm.with_structured_output(CodexMemoryUpdate).invoke(
+        [HumanMessage(content=prompt)]
+    )
+    store = get_langmem_store()
+    namespace = memory_namespace(history_id)
+    existing_ids = {str(item["id"]) for item in existing}
+    for memory_id in update.delete_ids:
+        if memory_id in existing_ids:
+            store.delete(namespace, memory_id)
+    existing_by_subject = {
+        str(item.get("topic") or "").strip().casefold(): str(item["id"])
+        for item in existing
+        if item.get("topic") and item.get("id")
+    }
+    for memory in update.upserts:
+        subject_key = memory.subject.strip().casefold()
+        memory_id = existing_by_subject.get(subject_key)
+        if not memory_id:
+            digest = hashlib.sha256(subject_key.encode("utf-8")).hexdigest()[:20]
+            memory_id = f"codex-{digest}"
+        store.put(
+            namespace,
+            memory_id,
+            {
+                "kind": "PaperReaderMemory",
+                "content": memory.model_dump(mode="json"),
+            },
+        )
 
 
 def extract_auto_memory(conversation_id: str, **kwargs: Any) -> int:
@@ -620,6 +687,9 @@ def _message_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "sequence": int(row["sequence"]),
         "created_at": str(row["created_at"]),
         "model_trace": model_trace,
+        "external_sources": (
+            list(model_trace.get("external_sources") or []) if isinstance(model_trace, dict) else []
+        ),
     }
 
 

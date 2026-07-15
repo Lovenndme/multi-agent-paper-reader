@@ -17,11 +17,14 @@ def run_summary_agent(
     method_output: MethodOutput,
     experiment_output: ExperimentOutput,
     critic_output: CriticOutput,
+    *,
+    tool_context_path: str | Path | None = None,
 ) -> SummaryOutput:
     """Synthesize outputs from the three parallel agents into a structured reading note."""
     return invoke_structured_with_retry(
         SummaryOutput,
         build_summary_messages(paper_title, method_output, experiment_output, critic_output),
+        tool_context_path=tool_context_path,
     )
 
 
@@ -31,12 +34,15 @@ def stream_summary_agent(
     experiment_output: ExperimentOutput,
     critic_output: CriticOutput,
     on_token: Callable[[str], None],
+    *,
+    tool_context_path: str | Path | None = None,
 ) -> SummaryOutput:
     """Stream SummaryAgent JSON tokens and return parsed structured output."""
     return stream_structured_with_retry(
         SummaryOutput,
         build_summary_messages(paper_title, method_output, experiment_output, critic_output),
         on_token=on_token,
+        tool_context_path=tool_context_path,
     )
 
 

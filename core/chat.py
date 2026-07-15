@@ -19,12 +19,17 @@ from pydantic import BaseModel, Field
 
 from core.evidence import EvidenceSnippet
 from core.chat_memory import PromptMemory, get_prompt_memory
+from core.codex_tools import (
+    create_codex_tool_context,
+    create_codex_tool_context_from_history,
+)
 from core.external_knowledge import (
     format_external_sources,
     search_external_academic_sources,
 )
 from core.model_providers import (
     active_text_model_identity,
+    codex_model_catalog,
     model_display_label,
     model_modes,
     provider_label,
@@ -668,7 +673,14 @@ def resolve_chat_model_route(request: PaperChatRequest) -> tuple[str, str, str]:
     spec = provider_spec(provider_id)
     model = (request.text_model or "").strip()
     if not model:
-        model = selected_text_model() if provider_id == global_provider else spec.default_text_model
+        if provider_id == global_provider:
+            model = selected_text_model()
+        elif spec.credential_type == "codex_login":
+            catalog = codex_model_catalog()
+            recommended = next((item.id for item in catalog if item.recommended), None)
+            model = recommended or (catalog[0].id if catalog else "")
+        else:
+            model = spec.default_text_model
 
     available_modes = model_modes(provider_id, model)
     requested_mode = (request.text_mode or "").strip().lower()
@@ -691,29 +703,46 @@ def stream_chat_reply(
     model_messages = list(messages) if messages is not None else build_chat_messages(request)
     provider_id, model, mode = resolve_chat_model_route(request)
     llm = get_chat_llm_for_route(provider_id, model, mode)
+    tool_context = None
+    if provider_id == "codex":
+        if request.history_id:
+            tool_context = create_codex_tool_context_from_history(request.history_id)
+        else:
+            session = get_analysis_session(request.analysis_id)
+            if session is not None:
+                tool_context = create_codex_tool_context(
+                    snippets=session.snippets,
+                    context=session.context,
+                )
+        if tool_context is not None and hasattr(llm, "with_tool_context"):
+            llm = llm.with_tool_context(tool_context.path)
     runtime_trace = trace if trace is not None else {}
     runtime_trace.clear()
     runtime_trace.update(start_text_model_call_trace(llm, provider_id))
     emitted = False
     try:
-        for chunk in llm.stream(model_messages):
-            update_text_model_call_trace(runtime_trace, chunk)
-            text = _content_to_text(getattr(chunk, "content", chunk))
-            if not text:
-                continue
-            emitted = True
-            yield text
-        return
-    except Exception:
-        if emitted:
-            raise
+        try:
+            for chunk in llm.stream(model_messages):
+                update_text_model_call_trace(runtime_trace, chunk)
+                text = _content_to_text(getattr(chunk, "content", chunk))
+                if not text:
+                    continue
+                emitted = True
+                yield text
+            return
+        except Exception:
+            if emitted:
+                raise
 
-    response = invoke_with_retry(llm, model_messages, retries=2, delay=1.5)
-    update_text_model_call_trace(runtime_trace, response)
-    text = _content_to_text(getattr(response, "content", response)).strip()
-    if not text:
-        raise RuntimeError("模型没有返回可显示的追问回答。")
-    yield text
+        response = invoke_with_retry(llm, model_messages, retries=2, delay=1.5)
+        update_text_model_call_trace(runtime_trace, response)
+        text = _content_to_text(getattr(response, "content", response)).strip()
+        if not text:
+            raise RuntimeError("模型没有返回可显示的追问回答。")
+        yield text
+    finally:
+        if tool_context is not None:
+            tool_context.close()
 
 
 def demo_chat_reply(request: PaperChatRequest) -> str:

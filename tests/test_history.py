@@ -16,6 +16,7 @@ from core.history import (
     history_database_connection,
     list_paper_history,
     load_paper_analysis,
+    retained_paper_pdf_path,
     save_paper_analysis,
 )
 from core.pdf_parser import ParsedPaper, Section
@@ -106,6 +107,23 @@ class TestPaperHistory(unittest.TestCase):
         self.assertEqual(len(pdf_files), 1)
         self.assertFalse(pdf_files[0].exists())
         self.assertIsNone(load_paper_analysis(history_id))
+
+    def test_retained_pdf_accessor_rejects_database_paths_outside_paper_store(self):
+        history_id = save_paper_analysis(
+            pdf_data=b"%PDF-1.7 bound path",
+            result=_result("Bound Path"),
+            snippets=[_snippet("evidence")],
+        )
+        self.assertIsNotNone(retained_paper_pdf_path(history_id))
+        outside = Path(self.temp_directory.name) / "outside.pdf"
+        outside.write_bytes(b"%PDF-1.7 outside")
+        with history_database_connection() as connection:
+            connection.execute(
+                "UPDATE paper_history SET pdf_path = ? WHERE id = ?",
+                (str(outside), history_id),
+            )
+
+        self.assertIsNone(retained_paper_pdf_path(history_id))
 
     def test_demo_stream_persists_and_history_api_restores_result(self):
         paper = ParsedPaper(

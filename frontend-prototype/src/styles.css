@@ -1641,9 +1641,10 @@ button {
 }
 
 .model-call-trace {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   min-height: 29px;
   margin-top: 2px;
@@ -1653,7 +1654,14 @@ button {
   font-size: 10.5px;
 }
 
-.model-call-trace > span {
+.model-call-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-call-identity > span {
   overflow: hidden;
   color: #315675;
   font-weight: 650;
@@ -1661,12 +1669,143 @@ button {
   white-space: nowrap;
 }
 
-.model-call-trace.confirmed > svg:first-child {
+.model-call-trace.confirmed .model-call-identity > svg:first-child {
   color: #159866;
 }
 
-.model-call-trace.warning > svg:first-child {
+.model-call-trace.warning .model-call-identity > svg:first-child {
   color: #bd6a13;
+}
+
+.model-call-capabilities {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.model-call-capabilities > span {
+  display: inline-flex;
+  max-width: 180px;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(52, 105, 156, 0.08);
+  color: #426781;
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-call-capabilities > span.ultra {
+  background: rgba(105, 82, 211, 0.1);
+  color: #6751b9;
+}
+
+.external-sources-panel {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(47, 126, 196, 0.16);
+  border-radius: 8px;
+  background: rgba(240, 247, 254, 0.72);
+}
+
+.external-sources-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(47, 126, 196, 0.11);
+}
+
+.external-sources-panel > header span,
+.external-sources-panel > header small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #285d88;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.external-sources-panel > header small {
+  color: rgba(44, 78, 105, 0.52);
+  font-size: 9px;
+}
+
+.external-source-list {
+  display: grid;
+  gap: 1px;
+}
+
+.external-source-list article {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.external-source-icon {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(37, 119, 193, 0.09);
+  color: #2378bb;
+}
+
+.external-source-list article > div {
+  min-width: 0;
+}
+
+.external-source-list a,
+.external-source-list strong,
+.external-source-list small {
+  display: block;
+}
+
+.external-source-list a,
+.external-source-list strong {
+  overflow: hidden;
+  color: #175f99;
+  font-size: 10.5px;
+  font-weight: 680;
+  line-height: 1.35;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.external-source-list a svg {
+  display: inline;
+  vertical-align: -2px;
+}
+
+.external-source-list small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: rgba(44, 76, 103, 0.56);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-message .external-sources-panel > p {
+  margin: 0;
+  padding: 7px 10px;
+  border-top: 1px solid rgba(47, 126, 196, 0.1);
+  color: rgba(44, 76, 103, 0.58);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .chat-typing {
@@ -2515,6 +2654,268 @@ button {
   gap: 3px;
 }
 
+.codex-plan-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(231, 162, 58, 0.1);
+  color: #9a681d;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.codex-plan-badge.connected {
+  background: rgba(29, 175, 114, 0.1);
+  color: #16885c;
+}
+
+.codex-subscription-card {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid rgba(31, 125, 230, 0.18);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #f2f8ff, #f8fbff);
+}
+
+.codex-subscription-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 10px;
+  background: #1677ee;
+  color: #fff;
+  box-shadow: 0 5px 14px rgba(22, 119, 238, 0.2);
+}
+
+.codex-subscription-card > div {
+  min-width: 0;
+}
+
+.codex-subscription-card > div strong,
+.codex-subscription-card > div small {
+  display: block;
+}
+
+.codex-subscription-card > div strong {
+  color: #17344f;
+  font-size: 11.5px;
+}
+
+.codex-subscription-card > div small {
+  margin-top: 4px;
+  color: rgba(43, 69, 93, 0.62);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.codex-connect-action {
+  min-width: 108px;
+}
+
+.codex-card-actions {
+  display: flex;
+  min-width: 112px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.settings-tertiary-action {
+  min-height: 27px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #2f6fa8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 680;
+}
+
+.settings-tertiary-action:hover:not(:disabled) {
+  background: rgba(33, 112, 181, 0.08);
+}
+
+.settings-tertiary-action.danger {
+  color: #a94b46;
+}
+
+.settings-tertiary-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.codex-local-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 9px 2px 0;
+  color: #60798f;
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.codex-local-notice svg {
+  flex: none;
+  margin-top: 1px;
+  color: #16885c;
+}
+
+.codex-runtime-health {
+  margin-top: 11px;
+}
+
+.codex-runtime-health .settings-health-card.ok > code {
+  color: #287456;
+}
+
+.codex-security-profile {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(44, 121, 186, 0.14);
+  border-radius: 8px;
+  background: #f8fbfe;
+}
+
+.codex-security-profile > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.codex-security-profile > header > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #285374;
+  font-size: 10.5px;
+}
+
+.codex-security-profile > header > div svg {
+  color: #16885c;
+}
+
+.codex-security-profile > header small {
+  color: rgba(43, 69, 93, 0.5);
+  font-size: 8.5px;
+}
+
+.codex-security-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.codex-security-badges > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  border-radius: 999px;
+  background: rgba(29, 175, 114, 0.09);
+  color: #197b58;
+  font-size: 8.8px;
+  font-weight: 680;
+}
+
+.codex-security-badges > span.blocked {
+  background: rgba(63, 102, 135, 0.07);
+  color: #59728a;
+}
+
+.codex-security-badges > span.special {
+  background: rgba(105, 82, 211, 0.1);
+  color: #6751b9;
+}
+
+.codex-security-badges > span.unavailable {
+  background: rgba(215, 93, 84, 0.09);
+  color: #a94b46;
+}
+
+.codex-tool-details {
+  margin-top: 9px;
+  border-top: 1px solid rgba(78, 111, 142, 0.11);
+  padding-top: 8px;
+}
+
+.codex-tool-details summary {
+  width: max-content;
+  max-width: 100%;
+  color: #246ca7;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.codex-tool-details > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.codex-tool-details code {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 5px;
+  border-radius: 4px;
+  background: rgba(45, 94, 135, 0.07);
+  color: #3b607d;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-device-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(91, 75, 194, 0.18);
+  border-radius: 8px;
+  background: rgba(244, 242, 255, 0.82);
+}
+
+.codex-device-code > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-device-code span {
+  color: #685a94;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.codex-device-code code {
+  color: #44358d;
+  font-size: 13px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+}
+
+.codex-device-code a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #5e4ab9;
+  font-size: 9px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 .settings-health-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -2806,9 +3207,9 @@ button {
 
 .settings-mode-panel {
   grid-column: 3 / 5;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
   margin-top: -2px;
   padding: 9px 10px;
@@ -2816,6 +3217,11 @@ button {
   border-radius: 10px;
   background: linear-gradient(135deg, rgba(239, 243, 255, 0.92), rgba(247, 250, 255, 0.84));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.settings-mode-panel.codex-mode-panel {
+  grid-column: 2 / -1;
+  grid-template-columns: minmax(120px, 0.75fr) minmax(360px, 1.65fr);
 }
 
 .settings-mode-copy {
@@ -2884,6 +3290,26 @@ button {
 .settings-mode-switch button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.settings-mode-switch.codex-six-tier {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.settings-mode-switch.codex-six-tier button {
+  min-width: 0;
+  justify-content: center;
+  padding-inline: 7px;
+}
+
+.settings-mode-availability {
+  grid-column: 1 / -1;
+  margin-top: -5px;
+  color: #9b631a;
+  font-size: 8.5px;
+  line-height: 1.4;
 }
 
 .settings-toggle {
@@ -3633,6 +4059,24 @@ button {
     gap: 10px;
   }
 
+  .codex-subscription-card {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .codex-card-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .codex-connect-action {
+    width: 100%;
+  }
+
+  .codex-device-code {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .settings-route-row {
     grid-template-columns: 34px minmax(0, 1fr) auto;
     gap: 9px;
@@ -3657,14 +4101,20 @@ button {
     grid-row: 1;
   }
 
-  .settings-mode-panel {
+  .settings-mode-panel,
+  .settings-mode-panel.codex-mode-panel {
     grid-row: 4;
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
-    flex-direction: column;
   }
 
   .settings-mode-switch {
+    grid-column: 1;
     align-self: stretch;
+  }
+
+  .settings-mode-switch.codex-six-tier {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .settings-mode-switch button {

@@ -150,6 +150,26 @@ def paper_history_exists(history_id: str) -> bool:
     return row is not None
 
 
+def retained_paper_pdf_path(history_id: str) -> Path | None:
+    """Resolve a retained PDF by database identity without accepting a model-supplied path."""
+    if not history_id or not isinstance(history_id, str):
+        return None
+    with history_database_connection() as connection:
+        row = connection.execute(
+            "SELECT pdf_path FROM paper_history WHERE id = ?",
+            (history_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        path = Path(str(row["pdf_path"])).expanduser().resolve(strict=True)
+        allowed_root = _paper_directory().resolve(strict=True)
+        path.relative_to(allowed_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path if path.is_file() and path.suffix.lower() == ".pdf" else None
+
+
 def delete_paper_history(history_id: str) -> bool:
     """Delete one saved analysis and its retained PDF."""
     with _HISTORY_LOCK, history_database_connection() as connection:

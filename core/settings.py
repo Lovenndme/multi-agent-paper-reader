@@ -18,11 +18,15 @@ from pydantic import BaseModel, SecretStr
 
 from core.model_health import invalidate_model_catalog_health_cache
 from core.model_providers import (
+    ModelModeSpec,
+    ModelSpec,
     PROVIDERS,
     model_mode_request_body,
+    model_is_known,
     model_modes,
     provider_api_key,
     provider_base_url,
+    provider_credential_configured,
     provider_label,
     provider_protocol,
     provider_spec,
@@ -39,7 +43,7 @@ from utils.llm import is_llm_configured, is_vision_configured, reset_llm_clients
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", PROJECT_ROOT / ".env"))
-PROJECT_VERSION = "V1.4.2"
+PROJECT_VERSION = "V1.5.0"
 _SETTINGS_LOCK = threading.Lock()
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
@@ -93,6 +97,44 @@ def application_settings_payload() -> dict[str, Any]:
         custom_vision_model = os.environ.get("CUSTOM_VISION_MODEL", "").strip()
         text_models = list(spec.text_models)
         vision_models = list(spec.vision_models)
+        codex_status = None
+        if spec.credential_type == "codex_login":
+            from core.codex_sdk import get_codex_sdk_service
+
+            service = get_codex_sdk_service()
+            codex_status = service.status()
+            catalog = ()
+            if codex_status.get("authenticated"):
+                try:
+                    catalog = service.models()
+                except Exception:  # noqa: BLE001 - status carries the safe failure state
+                    catalog = ()
+                codex_status = service.status()
+            # Never fall back to the descriptive static Codex entries. The
+            # account's live model/list response is the sole routing authority.
+            text_models = [
+                ModelSpec(
+                    model.id,
+                    model.label,
+                    model.description,
+                    model.recommended,
+                    ("Codex", "订阅"),
+                    _codex_effort_modes(model),
+                    model.default_effort,
+                )
+                for model in catalog
+            ]
+            vision_models = [
+                ModelSpec(
+                    model.id,
+                    model.label,
+                    "通过 Codex SDK 使用本地论文图像",
+                    model.recommended,
+                    ("Codex", "视觉"),
+                )
+                for model in catalog
+                if model.supports_image
+            ]
         if spec.customizable:
             text_models = [
                 type(spec.text_models[0])(
@@ -116,14 +158,17 @@ def application_settings_payload() -> dict[str, Any]:
             {
                 "id": spec.id,
                 "label": provider_label(spec.id),
-                "configured": bool(provider_api_key(spec.id)),
+                "configured": provider_credential_configured(spec.id),
                 "base_url": provider_base_url(spec.id),
                 "key_url": spec.key_url,
                 "protocol": provider_protocol(spec.id),
+                "credential_type": spec.credential_type,
+                "local_only": spec.local_only,
+                "codex_status": codex_status,
                 "customizable": spec.customizable,
                 "provider_name": provider_label(spec.id),
                 "supports_vision": bool(vision_models),
-                "default_text_model": text_models[0].id,
+                "default_text_model": text_models[0].id if text_models else None,
                 "default_vision_model": vision_models[0].id if vision_models else None,
                 "text_models": [model.payload() for model in text_models],
                 "vision_models": [model.payload() for model in vision_models],
@@ -149,7 +194,7 @@ def application_settings_payload() -> dict[str, Any]:
                 "provider_label": provider_label(active_vision_provider),
                 "model": selected_vision_model(),
                 "configured": vision_configured,
-                "credential_configured": bool(provider_api_key(active_vision_provider)),
+                "credential_configured": provider_credential_configured(active_vision_provider),
             },
         },
         "providers": providers,
@@ -191,6 +236,10 @@ def configure_provider_api_key(
         spec = provider_spec(provider_id.strip().lower())
     except ValueError as exc:
         raise ApiKeyValidationError(str(exc)) from exc
+    if spec.credential_type != "api_key":
+        raise ApiKeyValidationError(
+            "Codex 订阅不使用 API Key，请通过 Settings 中的 ChatGPT 登录入口连接。"
+        )
 
     clean_key = api_key.strip()
     if not 10 <= len(clean_key) <= 4096:
@@ -292,13 +341,17 @@ def configure_model_routing(
     except ValueError as exc:
         raise ModelRoutingValidationError(str(exc)) from exc
     text_model = _validated_model_id(request.text_model, "文本模型")
-    if not text_spec.customizable and not any(model.id == text_model for model in text_spec.text_models):
+    if not text_spec.customizable and not model_is_known(text_provider, "text", text_model):
         raise ModelRoutingValidationError(
             f"{provider_label(text_provider)} 不支持文本模型 {text_model}，请从模型列表中选择。"
         )
-    if not provider_api_key(text_provider):
+    if not provider_credential_configured(text_provider):
         raise ModelRoutingValidationError(
-            f"请先为 {provider_label(text_provider)} 配置并验证 API Key，再应用模型配置。"
+            (
+                "请先在 Settings 中连接本机 Codex 订阅，再应用模型配置。"
+                if text_spec.credential_type == "codex_login"
+                else f"请先为 {provider_label(text_provider)} 配置并验证 API Key，再应用模型配置。"
+            )
         )
 
     available_modes = model_modes(text_provider, text_model)
@@ -318,18 +371,26 @@ def configure_model_routing(
             "视觉理解必须与文本分析使用同一家厂商，不能单独切换视觉厂商。"
         )
     custom_vision_model = request.vision_model.strip() if request.vision_model else ""
-    if request.vision_enabled and not text_spec.vision_models and not (
+    supports_selected_vision = (
+        model_is_known(text_provider, "vision", text_model)
+        if text_spec.credential_type == "codex_login"
+        else bool(text_spec.vision_models)
+    )
+    if request.vision_enabled and not supports_selected_vision and not (
         text_spec.customizable and custom_vision_model
     ):
         raise ModelRoutingValidationError(
             f"{provider_label(text_provider)} 未配置可用的视觉模型，请关闭图表理解。"
         )
 
-    vision_model = (
-        _validated_model_id(custom_vision_model, "视觉模型")
-        if text_spec.customizable and custom_vision_model
-        else text_spec.default_vision_model or ""
-    )
+    if text_spec.credential_type == "codex_login":
+        vision_model = text_model if supports_selected_vision else ""
+    else:
+        vision_model = (
+            _validated_model_id(custom_vision_model, "视觉模型")
+            if text_spec.customizable and custom_vision_model
+            else text_spec.default_vision_model or ""
+        )
     if not text_spec.customizable and request.vision_model and request.vision_model.strip() not in {vision_model, ""}:
         raise ModelRoutingValidationError(
             f"视觉模型由系统自动配对为 {vision_model or '不可用'}，不能单独修改。"
@@ -456,6 +517,43 @@ def _validated_base_url(value: str) -> str:
     if parsed.username or parsed.password:
         raise ApiKeyValidationError("Base URL 中不能包含用户名或密码。")
     return clean_value
+
+
+def _codex_effort_label(effort: str) -> str:
+    return {
+        "low": "轻度",
+        "medium": "中等",
+        "high": "高",
+        "xhigh": "最高",
+        "max": "极高",
+        "ultra": "Ultra",
+    }.get(effort, effort)
+
+
+def _codex_effort_modes(model: Any) -> tuple[ModelModeSpec, ...]:
+    descriptions = {effort: description for effort, description in model.efforts}
+    output = []
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        available = effort in descriptions
+        output.append(
+            ModelModeSpec(
+                effort,
+                _codex_effort_label(effort),
+                descriptions.get(effort) or (
+                    "Ultra 会在相同只读沙箱和论文工具边界下按需启用受限子 Agent。"
+                    if effort == "ultra"
+                    else f"Codex {effort} 推理强度"
+                ),
+                available=available,
+                disabled_reason=(
+                    f"{model.label} 当前不支持 {_codex_effort_label(effort)}。"
+                    if not available
+                    else None
+                ),
+                execution_kind="multi_agent" if effort == "ultra" else "single_agent",
+            )
+        )
+    return tuple(output)
 
 
 def _validated_model_id(value: str, label: str) -> str:

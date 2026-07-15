@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from core.codex_sdk import CodexModelInfo
 from core.model_health import (
     invalidate_model_catalog_health_cache,
     model_catalog_health,
@@ -60,13 +61,24 @@ class _StatusError(RuntimeError):
 class TestModelCatalogHealth(unittest.TestCase):
     def setUp(self):
         invalidate_model_catalog_health_cache()
+        self.codex_service = SimpleNamespace(
+            status=MagicMock(return_value={"authenticated": False}),
+            models=MagicMock(return_value=()),
+        )
+        self.codex_service_patch = patch(
+            "core.codex_sdk.get_codex_sdk_service",
+            return_value=self.codex_service,
+        )
+        self.codex_service_patch.start()
 
     def tearDown(self):
+        self.codex_service_patch.stop()
         invalidate_model_catalog_health_cache()
 
     def test_unconfigured_providers_skip_remote_calls(self):
         with (
             patch("core.model_health.provider_api_key", return_value=None),
+            patch("core.model_health.provider_credential_configured", return_value=False),
             patch("core.model_health.OpenAI") as openai_client,
         ):
             payload = model_catalog_health(force=True)
@@ -74,6 +86,27 @@ class TestModelCatalogHealth(unittest.TestCase):
         self.assertEqual(payload["summary"]["unconfigured"], len(PROVIDERS))
         self.assertEqual(payload["summary"]["configured"], 0)
         openai_client.assert_not_called()
+
+    def test_codex_uses_local_login_and_dynamic_catalog_health(self):
+        model = CodexModelInfo(
+            id="gpt-test",
+            label="GPT Test",
+            description="Account model",
+            recommended=True,
+            supports_image=True,
+            default_effort="medium",
+            efforts=(("medium", "Balanced"),),
+        )
+        self.codex_service.status.return_value = {"authenticated": True}
+        self.codex_service.models.return_value = (model,)
+
+        payload = model_catalog_health(force=True)
+
+        health = next(item for item in payload["providers"] if item["id"] == "codex")
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["available_model_count"], 1)
+        self.assertEqual(health["vision_probe_status"], "catalog_confirmed")
+        self.assertEqual(health["vision_probe_model"], "gpt-test")
 
     def test_matching_qwen_catalog_is_healthy_and_cached(self):
         qwen = PROVIDERS["qwen"]

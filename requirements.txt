@@ -4,6 +4,12 @@ langchain-openai>=0.3.1
 langchain-anthropic>=0.3.3
 langmem==0.0.30
 openai>=1.0.0
+# PyPI does not yet publish the matching openai-codex SDK distribution for the
+# GPT-5.6 max/ultra catalog. Pin the official 0.144.4 SDK source revision until
+# OpenAI publishes a matching wheel. The archive URL avoids requiring
+# Git on end-user machines while remaining immutable and reproducible.
+openai-codex @ https://github.com/openai/codex/archive/3f74f00295dcb1346340686bb09c5bfd4f0237c4.tar.gz#sha256=f444a6ca308073dab245cd61ed123cf2e46fe5dd8067f5f9713e0aff3c19de47&subdirectory=sdk/python
+mcp==1.28.1
 pymupdf>=1.24.0
 pymupdf4llm==1.28.0
 fastembed==0.8.0

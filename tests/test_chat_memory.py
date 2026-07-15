@@ -6,7 +6,8 @@ import os
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from core.chat_memory import (
     add_conversation_message,
@@ -27,6 +28,7 @@ from core.langmem_store import (
     memory_namespace,
     reset_langmem_store,
 )
+from utils.llm import CodexChatModel
 
 
 class _FakeManager:
@@ -163,6 +165,52 @@ class TestChatMemory(unittest.TestCase):
         self.assertTrue(restored["conversation"]["memory_ready"])
         recalled = get_prompt_memory(conversation["id"], "章节标题应该怎么显示？")
         self.assertEqual(recalled.recalled_topics[0]["type"], "feedback")
+
+    def test_codex_memory_refresh_uses_json_schema_mutations_without_tools(self):
+        conversation = create_conversation(self.history_id)
+        add_conversation_message(conversation["id"], role="user", content="忘记旧目标，记住我偏好中文。")
+        add_conversation_message(conversation["id"], role="assistant", content="明白。")
+        self._put_memory(
+            "obsolete",
+            PaperReaderMemory(
+                category="project",
+                subject="旧目标",
+                content="旧目标应该被删除。",
+            ),
+        )
+        update = SimpleNamespace(
+            delete_ids=["obsolete"],
+            upserts=[
+                PaperReaderMemory(
+                    category="feedback",
+                    subject="回答语言",
+                    content="用户偏好中文回答。",
+                    context="论文追问使用中文。",
+                )
+            ],
+        )
+        structured = SimpleNamespace(invoke=MagicMock(return_value=update))
+        llm = CodexChatModel("gpt-5.4", "medium")
+
+        with (
+            patch("core.chat_memory.get_chat_llm", return_value=llm),
+            patch.object(
+                CodexChatModel,
+                "with_structured_output",
+                return_value=structured,
+            ) as structured_output,
+        ):
+            processed = refresh_conversation_memory(conversation["id"])
+
+        records = list_langmem_memories(self.history_id, limit=10, min_score=-1)
+        self.assertEqual(processed, 2)
+        self.assertFalse(any(item["id"] == "obsolete" for item in records))
+        self.assertEqual(records[0]["type"], "feedback")
+        self.assertIn("中文", records[0]["content"])
+        structured_output.assert_called_once()
+        prompt = structured.invoke.call_args.args[0][0].content
+        self.assertIn("Existing memories", prompt)
+        self.assertIn("忘记旧目标", prompt)
 
     def test_memory_is_shared_across_conversations_and_survives_store_restart(self):
         first = create_conversation(self.history_id)

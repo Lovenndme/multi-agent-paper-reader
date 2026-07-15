@@ -40,12 +40,67 @@ import {
 } from "@tabler/icons-react";
 import avatarUrl from "./assets/avatar.png";
 import { ComparisonWorkspace, comparisonMarkdownFromData } from "./ComparisonWorkspace.jsx";
+import { ExternalSourcesPanel } from "./ExternalSourcesPanel.jsx";
 import { ModelCallTrace } from "./ModelCallTrace.jsx";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
 import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
 const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
+const codex56ModelIds = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+
+function codexPlanLabel(value) {
+  const labels = {
+    free: "Free",
+    plus: "Plus",
+    pro: "Pro",
+    team: "Team",
+    business: "Business",
+    enterprise: "Enterprise",
+    edu: "Edu",
+  };
+  return labels[String(value || "").toLowerCase()] || "ChatGPT";
+}
+
+function providerTextModels(provider) {
+  const models = Array.isArray(provider?.text_models) ? provider.text_models : [];
+  return provider?.id === "codex" ? models.filter((model) => codex56ModelIds.has(model.id)) : models;
+}
+
+function defaultAvailableMode(model) {
+  const modes = Array.isArray(model?.modes) ? model.modes : [];
+  const preferred = modes.find((mode) => mode.id === model?.default_mode && mode.available !== false);
+  return preferred?.id || modes.find((mode) => mode.available !== false)?.id || "";
+}
+
+function modeIsAvailable(model, modeId) {
+  const modes = Array.isArray(model?.modes) ? model.modes : [];
+  if (!modes.length) return !modeId;
+  return modes.some((mode) => mode.id === modeId && mode.available !== false);
+}
+
+function codexCompatibilityTone(status) {
+  if (status?.compatibility === "ok") return "ok";
+  if (status?.compatibility === "mismatch" || status?.compatibility === "missing") return "unavailable";
+  return "drift";
+}
+
+function codexSecurityItems(profile) {
+  if (!profile) return [];
+  return [
+    { label: "临时线程", enabled: Boolean(profile.ephemeral) },
+    { label: "只读沙箱", enabled: profile.sandbox === "read_only" },
+    { label: "Web Search", enabled: Boolean(profile.web_search) },
+    { label: "图像查看", enabled: Boolean(profile.view_image) },
+    { label: "图像生成", enabled: Boolean(profile.image_generation) },
+    { label: "原生工具发现", enabled: Boolean(profile.tool_discovery) },
+    { label: `论文工具 ${Number(profile.tool_count) || 0}`, enabled: Number(profile.tool_count) > 0 },
+    { label: "Shell 已禁用", enabled: profile.shell === false, blocked: true },
+    { label: "任意文件写入已禁用", enabled: profile.filesystem_write === false, blocked: true },
+    { label: "apply_patch 写入受阻", enabled: profile.runtime_visible_blocked_tools?.includes("apply_patch"), blocked: true },
+    { label: "Ultra 启用多 Agent", enabled: profile.multi_agent_mode === "ultra_only", special: true },
+  ];
+}
 
 const tabs = ["概览", "方法", "实验", "批判性评审", "最终笔记"];
 const emptyAgentStates = {
@@ -800,9 +855,9 @@ function PaperChatDrawer({
     handleResizeKeyDown,
   } = useResizableChatDrawer();
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-  const configuredProviders = (modelProviders || []).filter(
-    (provider) => provider.configured && provider.text_models?.length,
-  );
+  const configuredProviders = (modelProviders || [])
+    .map((provider) => ({ ...provider, text_models: providerTextModels(provider) }))
+    .filter((provider) => provider.configured && provider.text_models.length);
   const selectedProvider = configuredProviders.find((provider) => provider.id === chatRoute.text_provider)
     || configuredProviders[0];
   const selectedModel = selectedProvider?.text_models?.find((model) => model.id === chatRoute.text_model)
@@ -1033,6 +1088,7 @@ function PaperChatDrawer({
                 </button>
               </div>
             )}
+            {message.role === "assistant" && !message.error && <ExternalSourcesPanel message={message} />}
             {message.role === "assistant" && <ModelCallTrace trace={message.model_trace} />}
           </article>
           );
@@ -1083,7 +1139,7 @@ function PaperChatDrawer({
                   onChatRouteChange({
                     text_provider: providerId,
                     text_model: modelId,
-                    text_mode: model?.default_mode || "",
+                    text_mode: defaultAvailableMode(model),
                   });
                 }}
               >
@@ -1102,7 +1158,9 @@ function PaperChatDrawer({
               >
                 {!selectedModes.length && <option value="">默认模式</option>}
                 {selectedModes.map((mode) => (
-                  <option value={mode.id} key={mode.id}>{mode.label}</option>
+                  <option value={mode.id} disabled={mode.available === false} key={mode.id}>
+                    {mode.label}{mode.available === false ? " · 当前模型不支持" : ""}
+                  </option>
                 ))}
               </select>
             </div>
@@ -1130,6 +1188,8 @@ function SettingsDialog({
   customTextModel,
   customVisionModel,
   saving,
+  codexConnecting,
+  codexDeviceCode,
   feedback,
   onRoutingChange,
   onSaveRouting,
@@ -1139,17 +1199,36 @@ function SettingsDialog({
   onToggleApiKey,
   onCustomFieldChange,
   onSaveApiKey,
+  onConnectCodex,
+  onDisconnectCodex,
   onRetry,
   onClose,
 }) {
   const providers = status?.providers || [];
+  const credentialProviders = providers.filter((provider) => provider.credential_type !== "codex_login");
+  const codexProvider = providers.find((provider) => provider.id === "codex");
+  const codexStatus = codexProvider?.codex_status;
   const textProvider = providers.find((provider) => provider.id === routing.text_provider) || providers[0];
-  const selectedTextModel = textProvider?.text_models?.find((model) => model.id === routing.text_model);
+  const textModels = providerTextModels(textProvider);
+  const selectedTextModel = textModels.find((model) => model.id === routing.text_model);
   const textModes = selectedTextModel?.modes || [];
+  const unavailableTextModes = textModes.filter((mode) => mode.available === false);
   const visionProvider = textProvider;
-  const credential = providers.find((provider) => provider.id === credentialProvider) || providers[0];
+  const credential = credentialProviders.find((provider) => provider.id === credentialProvider) || credentialProviders[0];
   const isCustomCredential = credential?.customizable;
   const configuredProviderCount = providers.filter((provider) => provider.configured).length;
+  const codexModels = providerTextModels(codexProvider);
+  const compatibilityTone = codexCompatibilityTone(codexStatus);
+  const securityItems = codexSecurityItems(codexStatus?.security_profile);
+  const routeModeValid = modeIsAvailable(selectedTextModel, routing.text_mode);
+  const codexRouteReady = textProvider?.id !== "codex" || Boolean(
+    codexStatus?.runtime_ready
+    && codexStatus?.sdk_compatible
+    && codexStatus?.authenticated
+    && codexStatus?.model_catalog_ready
+    && codexModels.length,
+  );
+  const routeCanApply = Boolean(selectedTextModel && routeModeValid && codexRouteReady);
 
   return (
     <div
@@ -1207,6 +1286,139 @@ function SettingsDialog({
               </div>
             </div>
 
+            {codexProvider && (
+              <section className="settings-section codex-subscription-section">
+                <header>
+                  <div>
+                    <h3>Codex 订阅</h3>
+                    <small>复用本机 ChatGPT 登录，无需 API Key</small>
+                  </div>
+                  <span className={`codex-plan-badge ${codexStatus?.authenticated ? "connected" : ""}`}>
+                    {codexStatus?.authenticated
+                      ? `${codexPlanLabel(codexStatus.plan_type)} · 已连接`
+                      : "未连接"}
+                  </span>
+                </header>
+                <div className="codex-subscription-card">
+                  <span className="codex-subscription-icon"><IconSparkles size={20} stroke={1.8} /></span>
+                  <div>
+                    <strong>{codexStatus?.message || "正在等待 Codex SDK 状态"}</strong>
+                    <small>
+                      {codexStatus?.authenticated
+                        ? codexModels.length
+                          ? `已读取 ${codexModels.length} 个 GPT-5.6 订阅模型；分析使用临时线程、只读沙箱、Web Search 与安全论文工具。`
+                          : codexStatus?.model_catalog_message
+                            || "订阅已连接，但当前账号没有可用的 GPT-5.6 模型。"
+                        : "连接后，论文 Agent、追问、对比和图表理解可以使用账号包含的 Codex 额度。"}
+                    </small>
+                  </div>
+                  <div className="codex-card-actions">
+                    <button
+                      className="settings-secondary-action codex-connect-action"
+                      type="button"
+                      onClick={() => onConnectCodex("browser")}
+                      disabled={codexConnecting || (!codexStatus?.authenticated && codexStatus?.runtime_ready === false)}
+                    >
+                      {codexConnecting ? <IconLoader2 className="spin" size={15} /> : <IconExternalLink size={15} />}
+                      {codexConnecting
+                        ? "正在处理"
+                        : codexStatus?.authenticated
+                          ? "刷新状态"
+                          : "浏览器登录"}
+                    </button>
+                    {!codexStatus?.authenticated && (
+                      <button
+                        className="settings-tertiary-action"
+                        type="button"
+                        onClick={() => onConnectCodex("device")}
+                        disabled={codexConnecting || codexStatus?.runtime_ready === false}
+                      >
+                        使用设备码
+                      </button>
+                    )}
+                    {codexStatus?.authenticated && (
+                      <button
+                        className="settings-tertiary-action danger"
+                        type="button"
+                        onClick={onDisconnectCodex}
+                        disabled={codexConnecting}
+                      >
+                        断开连接
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <p className="codex-local-notice">
+                  <IconShieldCheck size={15} /> 项目完全在当前电脑运行，并使用当前用户自己的 ChatGPT/Codex 订阅；网页不会读取、保存或返回 Codex token。
+                </p>
+                <div className="settings-health-grid codex-runtime-health" aria-label="Codex SDK 与 runtime 状态">
+                  <div className={`settings-health-card ${codexStatus?.installed ? "ok" : "unavailable"}`}>
+                    <div><strong>Python SDK</strong><span><i />{codexStatus?.installed ? "已安装" : "缺失"}</span></div>
+                    <code>{codexStatus?.sdk_version || "未安装"}</code>
+                  </div>
+                  <div className={`settings-health-card ${codexStatus?.runtime_ready ? "ok" : "unavailable"}`}>
+                    <div><strong>Codex runtime</strong><span><i />{codexStatus?.runtime_ready ? "可用" : "不可用"}</span></div>
+                    <code>{codexStatus?.runtime_version || codexStatus?.binary_version || "未检测到"}</code>
+                  </div>
+                  <div className={`settings-health-card ${compatibilityTone}`}>
+                    <div><strong>版本兼容</strong><span><i />{codexStatus?.compatibility === "ok" ? "兼容" : "需处理"}</span></div>
+                    <small>{codexStatus?.compatibility_message || "正在等待兼容性检查。"}</small>
+                  </div>
+                </div>
+                {securityItems.length > 0 && (
+                  <div className="codex-security-profile">
+                    <header>
+                      <div><IconShieldCheck size={15} /><strong>安全运行权限</strong></div>
+                      <small>由本机后端实时报告</small>
+                    </header>
+                    <div className="codex-security-badges">
+                      {securityItems.map((item) => (
+                        <span
+                          className={`${item.enabled ? "enabled" : "unavailable"}${item.blocked ? " blocked" : ""}${item.special ? " special" : ""}`}
+                          key={item.label}
+                        >
+                          {item.enabled ? <IconCheck size={12} /> : <IconX size={12} />}{item.label}
+                        </span>
+                      ))}
+                    </div>
+                    {codexStatus?.security_profile?.paper_tools?.length > 0 && (
+                      <details className="codex-tool-details">
+                        <summary>查看论文专用工具</summary>
+                        <div>
+                          {codexStatus.security_profile.paper_tools.map((tool) => <code key={tool}>{tool}</code>)}
+                        </div>
+                      </details>
+                    )}
+                    {codexStatus?.security_profile?.native_tools?.length > 0 && (
+                      <details className="codex-tool-details">
+                        <summary>查看 Codex 原生能力</summary>
+                        <div>
+                          {codexStatus.security_profile.native_tools.map((tool) => <code key={tool}>{tool}</code>)}
+                        </div>
+                        <small>`exec`/`wait` 是 5.6 模型要求的无 Node、无直接文件系统或网络的 V8 编排层；普通文件操作受只读沙箱约束，图像生成仅写入 Codex 本机生成目录。</small>
+                      </details>
+                    )}
+                  </div>
+                )}
+                {codexDeviceCode?.code && (
+                  <div className="codex-device-code" role="status">
+                    <div><span>设备码</span><code>{codexDeviceCode.code}</code></div>
+                    {/^https?:\/\//i.test(codexDeviceCode.verificationUrl || "") && (
+                      <a href={codexDeviceCode.verificationUrl} target="_blank" rel="noopener noreferrer">
+                        打开验证页面 <IconExternalLink size={13} />
+                      </a>
+                    )}
+                  </div>
+                )}
+                {feedback?.scope === "codex" && feedback.message && (
+                  <div className={`settings-feedback ${feedback.tone}`} role="status">
+                    {feedback.tone === "success" ? <IconCheck size={16} /> : <IconAlertCircle size={16} />}
+                    <span>{feedback.message}</span>
+                  </div>
+                )}
+              </section>
+            )}
+
             <section className="settings-section model-routing-section">
               <header>
                 <div>
@@ -1217,7 +1429,7 @@ function SettingsDialog({
                   className={`settings-secondary-action apply-routing ${feedback?.scope === "routing" ? feedback.tone : ""}`}
                   type="button"
                   onClick={onSaveRouting}
-                  disabled={saving || !routing.text_model}
+                  disabled={saving || !routeCanApply}
                 >
                   {saving && feedback?.scope === "routing" ? <IconLoader2 className="spin" size={15} /> : <IconCheck size={15} />}
                   {saving && feedback?.scope === "routing"
@@ -1251,28 +1463,38 @@ function SettingsDialog({
                       onChange={(event) => onRoutingChange("text_model", event.target.value)}
                       disabled={saving}
                     >
-                      {(textProvider?.text_models || []).map((model) => (
+                      {textModels.map((model) => (
                         <option value={model.id} key={model.id}>{model.label}</option>
                       ))}
                     </select>
                   </label>
                   <span className={`model-state ${textProvider?.configured ? "configured" : "unconfigured"}`}>
-                    <i /> {textProvider?.configured ? "Key 已配置" : "缺少 Key"}
+                    <i /> {textProvider?.credential_type === "codex_login"
+                      ? textProvider.configured
+                        ? textModels.length ? "订阅已连接" : "暂无 GPT-5.6"
+                        : "订阅未连接"
+                      : textProvider?.configured ? "Key 已配置" : "缺少 Key"}
                   </span>
                   {textModes.length > 0 && (
-                    <div className="settings-mode-panel">
+                    <div className={`settings-mode-panel${textProvider?.id === "codex" ? " codex-mode-panel" : ""}`}>
                       <div className="settings-mode-copy">
-                        <strong>响应模式</strong>
+                        <strong>{textProvider?.id === "codex" ? "推理强度" : "响应模式"}</strong>
                         <small>{textModes.find((mode) => mode.id === routing.text_mode)?.description || textModes[0].description}</small>
                       </div>
-                      <div className="settings-mode-switch" role="group" aria-label={`${selectedTextModel?.label || "当前模型"}响应模式`}>
+                      <div
+                        className={`settings-mode-switch${textProvider?.id === "codex" ? " codex-six-tier" : ""}`}
+                        role="group"
+                        aria-label={`${selectedTextModel?.label || "当前模型"}${textProvider?.id === "codex" ? "推理强度" : "响应模式"}`}
+                      >
                         {textModes.map((mode) => (
                           <button
                             type="button"
                             className={routing.text_mode === mode.id ? "active" : ""}
                             aria-pressed={routing.text_mode === mode.id}
+                            aria-describedby={mode.available === false ? "settings-mode-availability" : undefined}
+                            title={mode.disabled_reason || mode.description}
                             onClick={() => onRoutingChange("text_mode", mode.id)}
-                            disabled={saving}
+                            disabled={saving || mode.available === false}
                             key={mode.id}
                           >
                             {routing.text_mode === mode.id && <IconCheck size={13} />}
@@ -1280,6 +1502,11 @@ function SettingsDialog({
                           </button>
                         ))}
                       </div>
+                      {unavailableTextModes.length > 0 && (
+                        <small className="settings-mode-availability" id="settings-mode-availability">
+                          {unavailableTextModes.map((mode) => `${mode.label}：${mode.disabled_reason || "当前模型不支持"}`).join("；")}
+                        </small>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1384,7 +1611,7 @@ function SettingsDialog({
                       onChange={(event) => onCredentialProviderChange(event.target.value)}
                       disabled={saving}
                     >
-                      {providers.map((provider) => (
+                      {credentialProviders.map((provider) => (
                         <option value={provider.id} key={provider.id}>
                           {provider.label}{provider.configured ? " · 已配置" : ""}
                         </option>
@@ -1468,6 +1695,8 @@ export function App() {
   const [settingsCustomTextModel, setSettingsCustomTextModel] = useState("");
   const [settingsCustomVisionModel, setSettingsCustomVisionModel] = useState("");
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsCodexConnecting, setSettingsCodexConnecting] = useState(false);
+  const [settingsCodexDeviceCode, setSettingsCodexDeviceCode] = useState(null);
   const [settingsFeedback, setSettingsFeedback] = useState(null);
   const [chaptersOpen, setChaptersOpen] = useState(true);
   const [recentOpen, setRecentOpen] = useState(false);
@@ -1622,26 +1851,35 @@ export function App() {
       const payload = await response.json();
       const textRoute = payload.routing?.text;
       const visionRoute = payload.routing?.vision;
-      const initialCredentialProvider = textRoute?.provider || payload.providers?.[0]?.id || "zhipu";
+      const routeProvider = payload.providers?.find((provider) => provider.id === textRoute?.provider)
+        || payload.providers?.[0];
+      const routeModels = providerTextModels(routeProvider);
+      const routeModel = routeModels.find((model) => model.id === textRoute?.model) || routeModels[0];
+      const resolvedTextModel = routeModel?.id || "";
+      const resolvedTextMode = modeIsAvailable(routeModel, textRoute?.mode)
+        ? textRoute?.mode || ""
+        : defaultAvailableMode(routeModel);
+      const apiKeyProviders = (payload.providers || []).filter((provider) => provider.credential_type !== "codex_login");
+      const initialCredentialProvider = apiKeyProviders.some((provider) => provider.id === textRoute?.provider)
+        ? textRoute.provider
+        : apiKeyProviders[0]?.id || "zhipu";
       const initialCredential = payload.providers?.find((provider) => provider.id === initialCredentialProvider);
       const customProvider = payload.providers?.find((provider) => provider.id === "custom");
       setSettingsStatus(payload);
       setSettingsRouting({
         text_provider: textRoute?.provider || "zhipu",
-        text_model: textRoute?.model || "glm-5.2",
-        text_mode: textRoute?.mode
-          || initialCredential?.text_models?.find((model) => model.id === textRoute?.model)?.default_mode
-          || "",
-        vision_enabled: Boolean(visionRoute?.enabled && initialCredential?.supports_vision),
+        text_model: resolvedTextModel,
+        text_mode: resolvedTextMode,
+        vision_enabled: Boolean(visionRoute?.enabled && routeProvider?.supports_vision),
         vision_provider: textRoute?.provider || "zhipu",
-        vision_model: initialCredential?.default_vision_model || "",
+        vision_model: routeProvider?.credential_type === "codex_login"
+          ? resolvedTextModel
+          : visionRoute?.model || routeProvider?.default_vision_model || "",
       });
       setChatRoute({
         text_provider: textRoute?.provider || "zhipu",
-        text_model: textRoute?.model || "glm-5.2",
-        text_mode: textRoute?.mode
-          || initialCredential?.text_models?.find((model) => model.id === textRoute?.model)?.default_mode
-          || "",
+        text_model: resolvedTextModel,
+        text_mode: resolvedTextMode,
       });
       setSettingsCredentialProvider(initialCredentialProvider);
       setSettingsBaseUrl(initialCredential?.base_url || "");
@@ -1661,6 +1899,7 @@ export function App() {
     setSettingsApiKey("");
     setSettingsBaseUrl("");
     setSettingsApiKeyVisible(false);
+    setSettingsCodexDeviceCode(null);
     setSettingsFeedback(null);
     setSettingsOpen(true);
     void loadApplicationSettings();
@@ -1671,34 +1910,46 @@ export function App() {
     setSettingsOpen(false);
     setSettingsApiKey("");
     setSettingsApiKeyVisible(false);
+    setSettingsCodexDeviceCode(null);
     setSettingsFeedback(null);
   }
 
   function changeSettingsRouting(field, value) {
     if (field === "text_provider") {
       const provider = settingsStatus?.providers?.find((item) => item.id === value);
-      setSettingsCredentialProvider(value);
-      setSettingsBaseUrl(provider?.base_url || "");
+      if (provider?.credential_type !== "codex_login") {
+        setSettingsCredentialProvider(value);
+        setSettingsBaseUrl(provider?.base_url || "");
+      }
       setSettingsApiKey("");
       setSettingsApiKeyVisible(false);
     }
     setSettingsRouting((current) => {
       if (field === "text_provider") {
         const provider = settingsStatus?.providers?.find((item) => item.id === value);
+        const models = providerTextModels(provider);
+        const model = models.find((item) => item.id === provider?.default_text_model) || models[0];
         return {
           ...current,
           text_provider: value,
-          text_model: provider?.default_text_model || "",
-          text_mode: provider?.text_models?.[0]?.default_mode || "",
+          text_model: model?.id || "",
+          text_mode: defaultAvailableMode(model),
           vision_provider: value,
-          vision_model: provider?.default_vision_model || "",
+          vision_model: provider?.credential_type === "codex_login"
+            ? model?.id || ""
+            : provider?.default_vision_model || "",
           vision_enabled: Boolean(provider?.supports_vision),
         };
       }
       if (field === "text_model") {
         const provider = settingsStatus?.providers?.find((item) => item.id === current.text_provider);
-        const model = provider?.text_models?.find((item) => item.id === value);
-        return { ...current, text_model: value, text_mode: model?.default_mode || "" };
+        const model = providerTextModels(provider).find((item) => item.id === value);
+        return {
+          ...current,
+          text_model: value,
+          text_mode: defaultAvailableMode(model),
+          vision_model: provider?.credential_type === "codex_login" ? value : current.vision_model,
+        };
       }
       return { ...current, [field]: value };
     });
@@ -1725,18 +1976,158 @@ export function App() {
     setSettingsFeedback(null);
   }
 
+  async function connectCodexSubscription(method = "browser") {
+    if (settingsCodexConnecting) return;
+    const codexProvider = settingsStatus?.providers?.find((provider) => provider.id === "codex");
+    const useDeviceCode = method === "device";
+    setSettingsCodexConnecting(true);
+    setSettingsCodexDeviceCode(null);
+    setSettingsFeedback({
+      scope: "codex",
+      tone: "neutral",
+      message: codexProvider?.configured
+        ? "正在刷新本机 Codex 状态..."
+        : useDeviceCode ? "正在申请设备码..." : "正在创建 ChatGPT 登录窗口...",
+    });
+    let popup = null;
+    try {
+      if (codexProvider?.configured) {
+        const statusResponse = await fetch("/api/settings/codex/status?force=true");
+        const statusPayload = await statusResponse.json().catch(() => ({}));
+        if (!statusResponse.ok) throw new Error(statusPayload.detail || "Codex 状态刷新失败。");
+        await loadApplicationSettings();
+        setSettingsFeedback({ scope: "codex", tone: "success", message: "Codex 订阅状态和模型列表已刷新。" });
+        return;
+      }
+
+      popup = window.open("about:blank", "_blank");
+      if (popup) popup.opener = null;
+      const response = await fetch(
+        useDeviceCode ? "/api/settings/codex/login/device" : "/api/settings/codex/login",
+        { method: "POST" },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Codex 登录启动失败（HTTP ${response.status}）`);
+      if (payload.already_authenticated) {
+        if (popup) popup.close();
+        await loadApplicationSettings();
+        setSettingsFeedback({ scope: "codex", tone: "success", message: "已检测到本机 Codex 登录。" });
+        return;
+      }
+      const authUrl = useDeviceCode ? payload.verification_url : payload.auth_url;
+      if (!payload.login_id || !/^https?:\/\//i.test(authUrl || "")) {
+        throw new Error(useDeviceCode ? "Codex SDK 未返回有效的设备验证地址。" : "Codex SDK 未返回有效的登录地址。");
+      }
+      if (useDeviceCode) {
+        if (!payload.user_code) throw new Error("Codex SDK 未返回设备码。");
+        setSettingsCodexDeviceCode({ code: payload.user_code, verificationUrl: authUrl });
+      }
+      if (popup) popup.location.href = authUrl;
+      else window.open(authUrl, "_blank", "noopener,noreferrer");
+      setSettingsFeedback({
+        scope: "codex",
+        tone: "neutral",
+        message: useDeviceCode
+          ? "请在验证页面输入上方设备码；本页会自动检测授权结果。"
+          : "请在新窗口完成 ChatGPT 登录；本页会自动检测结果。若没有打开窗口，请允许浏览器弹窗。",
+      });
+
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const pollResponse = await fetch(`/api/settings/codex/login/${encodeURIComponent(payload.login_id)}`);
+        const pollPayload = await pollResponse.json().catch(() => ({}));
+        if (!pollResponse.ok) throw new Error(pollPayload.detail || "Codex 登录状态读取失败。");
+        if (pollPayload.status === "success") {
+          setSettingsCodexDeviceCode(null);
+          await loadApplicationSettings();
+          setSettingsFeedback({ scope: "codex", tone: "success", message: "ChatGPT 登录成功，Codex 订阅模型已可用。" });
+          return;
+        }
+        if (pollPayload.status === "error" || pollPayload.status === "unknown") {
+          throw new Error(pollPayload.message || "Codex 登录未完成。");
+        }
+      }
+      setSettingsFeedback({ scope: "codex", tone: "neutral", message: "仍在等待登录；完成后可点击“刷新状态”。" });
+    } catch (error) {
+      if (popup && !popup.closed) popup.close();
+      setSettingsFeedback({
+        scope: "codex",
+        tone: "error",
+        message: error instanceof Error ? error.message : "Codex 登录失败。",
+      });
+    } finally {
+      setSettingsCodexConnecting(false);
+    }
+  }
+
+  async function disconnectCodexSubscription() {
+    if (settingsCodexConnecting) return;
+    if (!window.confirm("这会退出本机共享的 Codex / ChatGPT 登录，其他本机 Codex 客户端可能也需要重新登录。确定继续吗？")) return;
+    setSettingsCodexConnecting(true);
+    setSettingsCodexDeviceCode(null);
+    setSettingsFeedback({ scope: "codex", tone: "neutral", message: "正在断开本机 Codex 登录..." });
+    try {
+      const response = await fetch("/api/settings/codex/session", { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Codex 断开失败（HTTP ${response.status}）`);
+      await loadApplicationSettings();
+      setSettingsFeedback({ scope: "codex", tone: "success", message: "已断开本机 Codex 登录。" });
+    } catch (error) {
+      setSettingsFeedback({
+        scope: "codex",
+        tone: "error",
+        message: error instanceof Error ? error.message : "Codex 断开失败。",
+      });
+    } finally {
+      setSettingsCodexConnecting(false);
+    }
+  }
+
   async function saveApplicationRouting() {
     if (settingsSaving) return;
     const selectedProvider = settingsStatus?.providers?.find(
       (provider) => provider.id === settingsRouting.text_provider,
     );
-    if (!selectedProvider?.configured) {
-      setSettingsCredentialProvider(settingsRouting.text_provider);
-      setSettingsBaseUrl(selectedProvider?.base_url || "");
+    const selectedModel = providerTextModels(selectedProvider).find(
+      (model) => model.id === settingsRouting.text_model,
+    );
+    if (!selectedModel) {
       setSettingsFeedback({
         scope: "routing",
         tone: "error",
-        message: `请先在下方配置并验证 ${selectedProvider?.label || "当前厂商"} API Key。`,
+        message: selectedProvider?.id === "codex"
+          ? "当前账号没有可用的 GPT-5.6 模型，请刷新 Codex 状态。"
+          : "当前模型已不在可用目录中，请重新选择。",
+      });
+      return;
+    }
+    if (!modeIsAvailable(selectedModel, settingsRouting.text_mode)) {
+      setSettingsFeedback({
+        scope: "routing",
+        tone: "error",
+        message: `${selectedModel.label} 不支持当前响应模式，请重新选择。`,
+      });
+      return;
+    }
+    if (selectedProvider?.id === "codex" && !selectedProvider.codex_status?.sdk_compatible) {
+      setSettingsFeedback({
+        scope: "routing",
+        tone: "error",
+        message: selectedProvider.codex_status?.compatibility_message || "Codex SDK 与 runtime 版本不兼容。",
+      });
+      return;
+    }
+    if (!selectedProvider?.configured) {
+      if (selectedProvider?.credential_type !== "codex_login") {
+        setSettingsCredentialProvider(settingsRouting.text_provider);
+        setSettingsBaseUrl(selectedProvider?.base_url || "");
+      }
+      setSettingsFeedback({
+        scope: "routing",
+        tone: "error",
+        message: selectedProvider?.credential_type === "codex_login"
+          ? "请先在上方连接本机 Codex 订阅。"
+          : `请先在下方配置并验证 ${selectedProvider?.label || "当前厂商"} API Key。`,
       });
       return;
     }
@@ -1744,7 +2135,9 @@ export function App() {
       ...settingsRouting,
       vision_enabled: Boolean(settingsRouting.vision_enabled && selectedProvider.supports_vision),
       vision_provider: settingsRouting.text_provider,
-      vision_model: selectedProvider.default_vision_model || "",
+      vision_model: selectedProvider.credential_type === "codex_login"
+        ? settingsRouting.text_model
+        : selectedProvider.default_vision_model || "",
     };
     setSettingsSaving(true);
     setSettingsFeedback({ scope: "routing", tone: "neutral", message: "正在应用模型配置..." });
@@ -1758,6 +2151,11 @@ export function App() {
       if (!response.ok) throw new Error(payload.detail || `模型配置保存失败（HTTP ${response.status}）`);
       setSettingsStatus(payload.settings);
       setSettingsRouting(synchronizedRouting);
+      setChatRoute({
+        text_provider: synchronizedRouting.text_provider,
+        text_model: synchronizedRouting.text_model,
+        text_mode: synchronizedRouting.text_mode,
+      });
       setSettingsFeedback({ scope: "routing", tone: "success", message: "模型路由已保存并立即生效。" });
     } catch (error) {
       setSettingsFeedback({
@@ -2275,6 +2673,7 @@ export function App() {
               ...message,
               content: answer,
               model_trace: completionEvent?.model_trace || null,
+              external_sources: completionEvent?.external_sources || [],
             }
             : message
       )));
@@ -2847,6 +3246,8 @@ export function App() {
           customTextModel={settingsCustomTextModel}
           customVisionModel={settingsCustomVisionModel}
           saving={settingsSaving}
+          codexConnecting={settingsCodexConnecting}
+          codexDeviceCode={settingsCodexDeviceCode}
           feedback={settingsFeedback}
           onRoutingChange={changeSettingsRouting}
           onSaveRouting={() => void saveApplicationRouting()}
@@ -2862,6 +3263,8 @@ export function App() {
           onToggleApiKey={() => setSettingsApiKeyVisible((value) => !value)}
           onCustomFieldChange={changeCustomRelayField}
           onSaveApiKey={saveApplicationApiKey}
+          onConnectCodex={(method) => void connectCodexSubscription(method)}
+          onDisconnectCodex={() => void disconnectCodexSubscription()}
           onRetry={() => void loadApplicationSettings()}
           onClose={closeApplicationSettings}
         />

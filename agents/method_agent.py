@@ -11,17 +11,27 @@ from utils.llm import invoke_structured_with_retry, stream_structured_with_retry
 _PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "method.txt"
 
 
-def run_method_agent(paper_text: str) -> MethodOutput:
+def run_method_agent(paper_text: str, *, tool_context_path: str | Path | None = None) -> MethodOutput:
     """Analyze method-related sections of a paper and return structured output."""
-    return invoke_structured_with_retry(MethodOutput, build_method_messages(paper_text))
+    return invoke_structured_with_retry(
+        MethodOutput,
+        build_method_messages(paper_text),
+        tool_context_path=tool_context_path,
+    )
 
 
-def stream_method_agent(paper_text: str, on_token: Callable[[str], None]) -> MethodOutput:
+def stream_method_agent(
+    paper_text: str,
+    on_token: Callable[[str], None],
+    *,
+    tool_context_path: str | Path | None = None,
+) -> MethodOutput:
     """Stream MethodAgent JSON tokens and return parsed structured output."""
     return stream_structured_with_retry(
         MethodOutput,
         build_method_messages(paper_text),
         on_token=on_token,
+        tool_context_path=tool_context_path,
     )
 
 

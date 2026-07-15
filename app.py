@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tempfile
 import time
@@ -11,8 +12,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -79,6 +81,8 @@ from core.comparison_history import (
     save_comparison,
     schedule_comparison_conversation_title,
 )
+from core.codex_sdk import CodexSDKError, close_codex_sdk_service, get_codex_sdk_service
+from core.codex_tools import create_codex_tool_context
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.history import (
     delete_paper_history,
@@ -91,8 +95,10 @@ from core.model_health import model_catalog_health
 from core.pdf_parser import ParsedPaper, parse_pdf
 from core.model_providers import (
     provider_label,
+    provider_spec,
     selected_text_model,
     selected_text_model_label,
+    selected_text_mode,
     selected_vision_model,
     text_provider_id,
     vision_enabled,
@@ -129,6 +135,7 @@ load_dotenv(
 async def _lifespan(_: FastAPI):
     yield
     drain_memory_refreshes(timeout=60.0)
+    close_codex_sdk_service()
 
 app = FastAPI(
     title="Multi-Agent Paper Reader",
@@ -304,21 +311,35 @@ def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str,
     if pdf_path is not None:
         enrich_paper_figures_with_vision(pdf_path, paper)
     snippets = build_evidence_index(paper)
-    method = run_method_agent(
-        evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method")
+    tool_context = (
+        create_codex_tool_context(snippets=snippets, paper=paper, pdf_path=pdf_path)
+        if text_provider_id() == "codex"
+        else None
     )
-    experiment = run_experiment_agent(
-        evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment")
-    )
-    critic = run_critic_agent(
-        evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic")
-    )
-    summary = run_summary_agent(
-        paper_title=paper.title,
-        method_output=method,
-        experiment_output=experiment,
-        critic_output=critic,
-    )
+    tool_path = tool_context.path if tool_context else None
+    try:
+        method = run_method_agent(
+            evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method"),
+            tool_context_path=tool_path,
+        )
+        experiment = run_experiment_agent(
+            evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment"),
+            tool_context_path=tool_path,
+        )
+        critic = run_critic_agent(
+            evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic"),
+            tool_context_path=tool_path,
+        )
+        summary = run_summary_agent(
+            paper_title=paper.title,
+            method_output=method,
+            experiment_output=experiment,
+            critic_output=critic,
+            tool_context_path=tool_path,
+        )
+    finally:
+        if tool_context:
+            tool_context.close()
     assessment = build_analysis_assessment(
         paper,
         snippets,
@@ -345,21 +366,68 @@ def _model_runtime_payload() -> dict[str, Any]:
     """Describe the active route so saved analyses remain reproducible."""
     text_provider = text_provider_id()
     visual_provider = vision_provider_id()
-    return {
+    payload = {
         "text_provider": text_provider,
         "text_provider_label": provider_label(text_provider),
         "text_model": selected_text_model(),
         "text_model_label": selected_text_model_label(),
+        "text_mode": selected_text_mode(),
         "vision_enabled": vision_enabled(),
         "vision_provider": visual_provider,
         "vision_provider_label": provider_label(visual_provider),
         "vision_model": selected_vision_model(),
     }
+    if text_provider == "codex":
+        payload["codex_security_profile"] = (
+            get_codex_sdk_service().status().get("security_profile") or {}
+        )
+    return payload
 
 
 def _missing_model_key_message() -> str:
     provider_id = text_provider_id()
+    if provider_spec(provider_id).credential_type == "codex_login":
+        return "本机 Codex 尚未登录 ChatGPT，请在 Settings 中连接 Codex 订阅。"
     return f"{provider_label(provider_id)} API Key 未配置，请在 Settings 中添加当前文本模型所需的密钥。"
+
+
+def _require_local_codex_request(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Codex 订阅连接仅允许从运行服务的本机发起。",
+        )
+    request_host = request.headers.get("host", "").strip().lower()
+    if host != "testclient" and not _is_loopback_http_host(request_host):
+        raise HTTPException(
+            status_code=403,
+            detail="Codex 订阅连接仅接受 localhost Host，已拒绝潜在的 DNS 重绑定请求。",
+        )
+    origin = request.headers.get("origin", "").strip()
+    if origin:
+        parsed_origin = urlparse(origin)
+        same_origin = (
+            parsed_origin.scheme in {"http", "https"}
+            and parsed_origin.netloc.lower() == request_host
+        )
+        if not same_origin:
+            raise HTTPException(
+                status_code=403,
+                detail="Codex 订阅连接拒绝跨站请求。",
+            )
+
+
+def _is_loopback_http_host(value: str) -> bool:
+    hostname = urlparse(f"//{value}").hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _stream_demo_tokens(agent_id: str, output: dict[str, Any]) -> Iterable[str]:
@@ -374,11 +442,16 @@ def _run_streaming_agent(
     stream_fn,
     paper_text: str,
     event_queue: Queue[str],
+    tool_context_path: Path | None = None,
 ):
     def on_token(token: str) -> None:
         event_queue.put(_stream_event("agent_token", agent=agent_id, text=token))
 
-    return stream_fn(paper_text, on_token=on_token)
+    return stream_fn(
+        paper_text,
+        on_token=on_token,
+        tool_context_path=tool_context_path,
+    )
 
 
 def _drain_agent_tokens(event_queue: Queue[str]) -> Iterable[str]:
@@ -394,6 +467,7 @@ def _stream_summary_agent_events(
     method_output: MethodOutput,
     experiment_output: ExperimentOutput,
     critic_output: CriticOutput,
+    tool_context_path: Path | None = None,
 ) -> Iterable[tuple[str, SummaryOutput | None]]:
     event_queue: Queue[str] = Queue()
 
@@ -408,6 +482,7 @@ def _stream_summary_agent_events(
             experiment_output,
             critic_output,
             on_token,
+            tool_context_path=tool_context_path,
         )
         while not future.done():
             for event in _drain_agent_tokens(event_queue):
@@ -514,6 +589,16 @@ def _stream_live_analysis(
             yield _stream_event("vision_error", message=f"Vision enrichment failed: {exc}")
     snippets = build_evidence_index(paper)
     index_payload = evidence_payload(snippets)
+    tool_context = (
+        create_codex_tool_context(
+            snippets=snippets,
+            paper=paper,
+            pdf_path=pdf_path,
+        )
+        if text_provider_id() == "codex"
+        else None
+    )
+    tool_path = tool_context.path if tool_context else None
     yield _stream_event(
         "evidence_index",
         evidence_index=index_payload,
@@ -544,7 +629,16 @@ def _stream_live_analysis(
         futures = {}
         for agent_id, (output_key, fn, paper_text) in agent_jobs.items():
             yield _stream_event("agent_started", agent=agent_id, message=f"{agent_id} started")
-            futures[executor.submit(_run_streaming_agent, agent_id, fn, paper_text, event_queue)] = (
+            futures[
+                executor.submit(
+                    _run_streaming_agent,
+                    agent_id,
+                    fn,
+                    paper_text,
+                    event_queue,
+                    tool_path,
+                )
+            ] = (
                 agent_id,
                 output_key,
             )
@@ -566,6 +660,8 @@ def _stream_live_analysis(
                         agent=agent_id,
                         message=f"{agent_id} failed: {exc}",
                     )
+                    if tool_context:
+                        tool_context.close()
                     return
 
                 output_payload = agent_output.model_dump()
@@ -595,6 +691,7 @@ def _stream_live_analysis(
             method_model,
             experiment_model,
             critic_model,
+            tool_path,
         ):
             if event:
                 yield event
@@ -605,7 +702,12 @@ def _stream_live_analysis(
         summary_output = summary_model
     except Exception as exc:  # noqa: BLE001 - stream actionable UI error
         yield _stream_event("error", agent="summary", message=f"summary failed: {exc}")
+        if tool_context:
+            tool_context.close()
         return
+
+    if tool_context:
+        tool_context.close()
 
     outputs["summary_output"] = summary_output.model_dump()
     outputs["assessment"] = build_analysis_assessment(
@@ -758,6 +860,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
             provider=(model_trace or {}).get("provider") or text_provider_id(),
             model=(model_trace or {}).get("requested_model") or selected_text_model(),
             model_trace=model_trace,
+            external_sources=(model_trace or {}).get("external_sources") or [],
             conversation_id=conversation_id,
             conversation=conversation,
             user_message=user_message,
@@ -902,6 +1005,7 @@ def _stream_comparison_chat_response(
             provider=(model_trace or {}).get("provider") or text_provider_id(),
             model=(model_trace or {}).get("requested_model") or selected_text_model(),
             model_trace=model_trace,
+            external_sources=(model_trace or {}).get("external_sources") or [],
             conversation_id=conversation_id,
             conversation=get_comparison_conversation_summary(conversation_id),
             user_message=user_message,
@@ -946,6 +1050,117 @@ def application_model_health(
 ) -> dict[str, Any]:
     """Check configured provider catalogs without exposing credentials."""
     return model_catalog_health(force=force)
+
+
+@app.get("/api/settings/codex/status")
+def codex_subscription_status(
+    force: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Return credential-safe local Codex account and model metadata."""
+    service = get_codex_sdk_service()
+    status = service.status(force=force)
+    models = ()
+    if status.get("authenticated"):
+        try:
+            models = service.models(force=force)
+        except CodexSDKError:
+            models = ()
+        # model/list records its own safe ready/empty/error state.
+        status = service.status()
+    return {
+        "ok": bool(
+            status.get("runtime_ready")
+            and (
+                not status.get("authenticated")
+                or status.get("model_catalog_ready")
+            )
+        ),
+        "status": status,
+        "models": [
+            {
+                "id": model.id,
+                "label": model.label,
+                "description": model.description,
+                "recommended": model.recommended,
+                "supports_image": model.supports_image,
+                "default_effort": model.default_effort,
+                "efforts": [
+                    {
+                        "id": effort,
+                        "description": next(
+                            (text for item, text in model.efforts if item == effort),
+                            "",
+                        ),
+                        "available": any(item == effort for item, _ in model.efforts),
+                        "disabled_reason": (
+                            None
+                            if any(item == effort for item, _ in model.efforts)
+                            else f"{model.label} 当前不支持该推理强度。"
+                        ),
+                        "execution_kind": "multi_agent" if effort == "ultra" else "single_agent",
+                    }
+                    for effort in ("low", "medium", "high", "xhigh", "max", "ultra")
+                ],
+            }
+            for model in models
+        ],
+    }
+
+
+@app.post("/api/settings/codex/login")
+def start_codex_subscription_login(request: Request) -> dict[str, Any]:
+    """Start the SDK browser flow only for a browser reaching this local host."""
+    _require_local_codex_request(request)
+    service = get_codex_sdk_service()
+    status = service.status(force=True)
+    if status.get("authenticated"):
+        return {"ok": True, "already_authenticated": True, "status": status}
+    try:
+        login = service.start_chatgpt_login()
+    except CodexSDKError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "already_authenticated": False, **login}
+
+
+@app.post("/api/settings/codex/login/device")
+def start_codex_subscription_device_login(request: Request) -> dict[str, Any]:
+    """Start the official device-code fallback from this local application only."""
+    _require_local_codex_request(request)
+    service = get_codex_sdk_service()
+    status = service.status(force=True)
+    if status.get("authenticated"):
+        return {"ok": True, "already_authenticated": True, "status": status}
+    try:
+        login = service.start_chatgpt_device_login()
+    except CodexSDKError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "already_authenticated": False, **login}
+
+
+@app.delete("/api/settings/codex/session")
+def logout_codex_subscription(request: Request) -> dict[str, Any]:
+    """Clear the official local Codex login after an explicit same-origin request."""
+    _require_local_codex_request(request)
+    service = get_codex_sdk_service()
+    try:
+        service.logout()
+    except CodexSDKError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "status": service.status(force=True)}
+
+
+@app.get("/api/settings/codex/login/{login_id}")
+def codex_subscription_login_state(login_id: str, request: Request) -> dict[str, Any]:
+    """Poll one SDK-managed login without exposing account credentials."""
+    _require_local_codex_request(request)
+    if not login_id or len(login_id) > 100:
+        raise HTTPException(status_code=404, detail="Codex 登录任务不存在。")
+    service = get_codex_sdk_service()
+    state = service.login_state(login_id)
+    payload: dict[str, Any] = {"ok": state.get("status") != "unknown", **state}
+    if state.get("status") == "success":
+        payload["account"] = service.status(force=True)
+    return payload
 
 
 @app.post("/api/settings/api-key")

@@ -8,7 +8,8 @@ from typing import Literal
 
 
 ModelCapability = Literal["text", "vision"]
-ApiProtocol = Literal["openai", "anthropic"]
+ApiProtocol = Literal["openai", "anthropic", "codex"]
+CredentialType = Literal["api_key", "codex_login"]
 
 
 @dataclass(frozen=True)
@@ -17,9 +18,19 @@ class ModelModeSpec:
     label: str
     description: str
     request_body: dict[str, object] = field(default_factory=dict)
+    available: bool = True
+    disabled_reason: str | None = None
+    execution_kind: str = "single_agent"
 
-    def payload(self) -> dict[str, str]:
-        return {"id": self.id, "label": self.label, "description": self.description}
+    def payload(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "available": self.available,
+            "disabled_reason": self.disabled_reason,
+            "execution_kind": self.execution_kind,
+        }
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,7 @@ class ModelSpec:
     recommended: bool = False
     tags: tuple[str, ...] = ()
     modes: tuple[ModelModeSpec, ...] = ()
+    default_mode: str | None = None
 
     def payload(self) -> dict[str, object]:
         return {
@@ -39,7 +51,10 @@ class ModelSpec:
             "recommended": self.recommended,
             "tags": list(self.tags),
             "modes": [mode.payload() for mode in self.modes],
-            "default_mode": self.modes[0].id if self.modes else None,
+            "default_mode": self.default_mode or next(
+                (mode.id for mode in self.modes if mode.available),
+                None,
+            ),
         }
 
 
@@ -56,6 +71,8 @@ class ProviderSpec:
     api_key_aliases: tuple[str, ...] = ()
     protocol: ApiProtocol = "openai"
     customizable: bool = False
+    credential_type: CredentialType = "api_key"
+    local_only: bool = False
 
     @property
     def default_text_model(self) -> str:
@@ -234,6 +251,34 @@ PROVIDERS: dict[str, ProviderSpec] = {
             ModelSpec("kimi-k2.5", "Kimi K2.5", "上一代原生多模态理解", tags=("稳定", "视觉")),
         ),
     ),
+    "codex": ProviderSpec(
+        id="codex",
+        label="Codex 订阅",
+        api_key_env="",
+        base_url_env="",
+        default_base_url="codex://local",
+        key_url="https://learn.chatgpt.com/docs/auth",
+        protocol="codex",
+        credential_type="codex_login",
+        local_only=True,
+        text_models=(
+            ModelSpec(
+                "gpt-5.6-sol",
+                "GPT-5.6 Sol",
+                "Codex 旗舰通用与推理模型",
+                True,
+                ("Codex", "订阅"),
+                (),
+            ),
+            ModelSpec("gpt-5.6-terra", "GPT-5.6 Terra", "Codex 高难度长任务模型"),
+            ModelSpec("gpt-5.6-luna", "GPT-5.6 Luna", "Codex 速度与质量均衡模型"),
+        ),
+        vision_models=(
+            ModelSpec("gpt-5.6-sol", "GPT-5.6 Sol", "Codex 论文图像理解", True, ("Codex", "视觉")),
+            ModelSpec("gpt-5.6-terra", "GPT-5.6 Terra", "Codex 复杂图表理解"),
+            ModelSpec("gpt-5.6-luna", "GPT-5.6 Luna", "Codex 高效视觉理解"),
+        ),
+    ),
     "openai": ProviderSpec(
         id="openai",
         label="OpenAI",
@@ -404,6 +449,8 @@ def vision_provider_id() -> str:
 
 def provider_api_key(provider_id: str) -> str | None:
     spec = provider_spec(provider_id)
+    if spec.credential_type != "api_key":
+        return None
     for env_name in (spec.api_key_env, *spec.api_key_aliases):
         value = os.environ.get(env_name)
         if value:
@@ -431,6 +478,8 @@ def provider_api_key(provider_id: str) -> str | None:
 
 def provider_base_url(provider_id: str) -> str:
     spec = provider_spec(provider_id)
+    if spec.credential_type == "codex_login":
+        return spec.default_base_url
     configured = os.environ.get(spec.base_url_env)
     if configured:
         return configured.rstrip("/")
@@ -464,6 +513,12 @@ def provider_base_url(provider_id: str) -> str:
 def selected_text_model() -> str:
     spec = provider_spec(text_provider_id())
     configured_model = os.environ.get("MODEL_NAME", "").strip()
+    if spec.credential_type == "codex_login":
+        catalog = codex_model_catalog()
+        if configured_model and any(item.id == configured_model for item in catalog):
+            return configured_model
+        recommended = next((item.id for item in catalog if item.recommended), None)
+        return recommended or (catalog[0].id if catalog else "")
     if spec.customizable and configured_model:
         return configured_model
     if configured_model and model_is_known(spec.id, "text", configured_model):
@@ -474,10 +529,42 @@ def selected_text_model() -> str:
 def model_modes(provider_id: str, model_id: str) -> tuple[ModelModeSpec, ...]:
     """Return the documented request modes for a catalog model."""
     spec = provider_spec(provider_id)
+    if spec.credential_type == "codex_login":
+        model = _codex_model(model_id)
+        if model is not None and model.efforts:
+            labels = {
+                "low": "轻度",
+                "medium": "中等",
+                "high": "高",
+                "xhigh": "最高",
+                "max": "极高",
+                "ultra": "Ultra",
+            }
+            order = ("low", "medium", "high", "xhigh", "max", "ultra")
+            efforts = sorted(
+                model.efforts,
+                key=lambda item: (
+                    item[0] != model.default_effort,
+                    order.index(item[0]) if item[0] in order else len(order),
+                ),
+            )
+            return tuple(
+                ModelModeSpec(
+                    effort,
+                    labels.get(effort, effort),
+                    description or f"Codex {effort} 推理强度",
+                    execution_kind="multi_agent" if effort == "ultra" else "single_agent",
+                )
+                for effort, description in efforts
+            )
+        # Codex routing is deliberately live-catalog only. Static entries exist
+        # solely as descriptive provider metadata and must never become a
+        # silent fallback when the account does not expose a model.
+        return ()
     if spec.customizable:
         return ()
     model = next((item for item in spec.text_models if item.id == model_id), None)
-    return model.modes if model else ()
+    return tuple(mode for mode in model.modes if mode.available) if model else ()
 
 
 def model_mode_request_body(provider_id: str, model_id: str, mode_id: str) -> dict[str, object]:
@@ -505,6 +592,9 @@ def model_display_label(
 ) -> str:
     """Return the user-facing catalog name while keeping API IDs internal."""
     spec = provider_spec(provider_id)
+    if spec.credential_type == "codex_login":
+        model = _codex_model(model_id)
+        return model.label if model is not None else model_id
     if spec.customizable:
         return model_id
     models = spec.text_models if capability == "text" else spec.vision_models
@@ -525,6 +615,9 @@ def active_text_model_identity() -> str:
 def selected_vision_model() -> str:
     """Return the provider's fixed recommended vision model, if available."""
     spec = provider_spec(vision_provider_id())
+    if spec.credential_type == "codex_login":
+        model_id = selected_text_model()
+        return model_id if model_is_known(spec.id, "vision", model_id) else ""
     if spec.customizable:
         return os.environ.get("VISION_MODEL_NAME", "").strip()
     return spec.default_vision_model or ""
@@ -538,12 +631,19 @@ def vision_enabled() -> bool:
         "off",
     }
     spec = provider_spec(text_provider_id())
-    supports_vision = bool(selected_vision_model()) if spec.customizable else bool(spec.vision_models)
+    supports_vision = (
+        bool(selected_vision_model())
+        if spec.customizable or spec.credential_type == "codex_login"
+        else bool(spec.vision_models)
+    )
     return requested and supports_vision
 
 
 def model_is_known(provider_id: str, capability: ModelCapability, model_id: str) -> bool:
     spec = provider_spec(provider_id)
+    if spec.credential_type == "codex_login":
+        model = _codex_model(model_id)
+        return model is not None and (capability == "text" or model.supports_image)
     if spec.customizable:
         return bool(model_id.strip())
     models = spec.text_models if capability == "text" else spec.vision_models
@@ -565,3 +665,30 @@ def provider_label(provider_id: str) -> str:
     if spec.customizable:
         return os.environ.get("CUSTOM_PROVIDER_NAME", "").strip() or spec.label
     return spec.label
+
+
+def provider_credential_configured(provider_id: str) -> bool:
+    """Return whether a provider has a usable local credential source."""
+    spec = provider_spec(provider_id)
+    if spec.credential_type == "codex_login":
+        try:
+            from core.codex_sdk import get_codex_sdk_service
+
+            return bool(get_codex_sdk_service().status().get("authenticated"))
+        except Exception:
+            return False
+    return bool(provider_api_key(provider_id))
+
+
+def codex_model_catalog():
+    """Return live Codex models without making the SDK a hard import dependency."""
+    try:
+        from core.codex_sdk import get_codex_sdk_service
+
+        return get_codex_sdk_service().models()
+    except Exception:
+        return ()
+
+
+def _codex_model(model_id: str):
+    return next((model for model in codex_model_catalog() if model.id == model_id), None)

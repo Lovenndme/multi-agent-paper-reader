@@ -11,7 +11,13 @@ from typing import Any
 
 from openai import OpenAI
 
-from core.model_providers import PROVIDERS, provider_api_key, provider_base_url
+from core.model_providers import (
+    PROVIDERS,
+    codex_model_catalog,
+    provider_api_key,
+    provider_base_url,
+    provider_credential_configured,
+)
 
 
 _CACHE_LOCK = threading.Lock()
@@ -72,14 +78,61 @@ def _check_provider_catalog(provider_id: str) -> dict[str, Any]:
     spec = PROVIDERS[provider_id]
     base_url = provider_base_url(provider_id)
     api_key = provider_api_key(provider_id)
+    configured = provider_credential_configured(provider_id)
     common: dict[str, Any] = {
         "id": provider_id,
         "label": spec.label,
-        "configured": bool(api_key),
+        "configured": configured,
         "base_url": base_url,
         "catalog_text_model_count": len(spec.text_models),
         "catalog_vision_model_count": len(spec.vision_models),
     }
+    if spec.credential_type == "codex_login":
+        if not configured:
+            return {
+                **common,
+                "status": "unconfigured",
+                "message": "本机 Codex 尚未登录 ChatGPT。",
+                "available_model_count": None,
+                "missing_text_models": [],
+                "missing_vision_models": [],
+                "vision_catalog_check": "not_run",
+                "vision_probe_status": "not_run",
+                "vision_probe_model": None,
+                "vision_http_status": None,
+                "http_status": None,
+            }
+        try:
+            models = codex_model_catalog()
+        except Exception:
+            models = ()
+        if not models:
+            return {
+                **common,
+                "status": "unavailable",
+                "message": "Codex SDK 未返回可用模型。",
+                "available_model_count": 0,
+                "missing_text_models": [],
+                "missing_vision_models": [],
+                "vision_catalog_check": "not_run",
+                "vision_probe_status": "not_run",
+                "vision_probe_model": None,
+                "vision_http_status": None,
+                "http_status": None,
+            }
+        return {
+            **common,
+            "status": "ok",
+            "message": "本机 Codex 登录与动态模型目录正常。",
+            "available_model_count": len(models),
+            "missing_text_models": [],
+            "missing_vision_models": [],
+            "vision_catalog_check": "verified" if any(item.supports_image for item in models) else "not_applicable",
+            "vision_probe_status": "catalog_confirmed" if any(item.supports_image for item in models) else "not_applicable",
+            "vision_probe_model": next((item.id for item in models if item.supports_image), None),
+            "vision_http_status": None,
+            "http_status": None,
+        }
     if not api_key:
         return {
             **common,
