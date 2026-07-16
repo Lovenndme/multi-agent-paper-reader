@@ -23,21 +23,28 @@ The repository includes a full-stack web app:
 - Section titles: the chapter list preserves each title in its original parsed language, compacting only abnormal whitespace and falling back to a numbered placeholder for damaged text
 - Static hosting: the FastAPI server serves the built React app from `frontend-prototype/dist`
 
-Run it locally:
+Python 3.10 or later is required. Git/source checkouts also need Node.js 18 or
+later with npm so the updater can rebuild the frontend. The formal Release ZIP
+already includes a verified frontend build and does not require Node.js unless
+that build is missing or mismatched. A Git clone is recommended for developers
+because it can be updated safely in place.
+
+First-time setup on Windows PowerShell:
+
+```powershell
+git clone https://github.com/Lovenndme/multi-agent-paper-reader.git
+cd multi-agent-paper-reader
+powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
+.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+First-time setup on macOS or Linux:
 
 ```bash
-# Python backend dependencies
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-
-# Frontend dependencies and production build
-cd frontend-prototype
-npm install
-npm run build
-cd ..
-
-# Start the full-stack app
-.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
+git clone https://github.com/Lovenndme/multi-agent-paper-reader.git
+cd multi-agent-paper-reader
+bash ./scripts/update.sh
+./.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
 Open:
@@ -45,6 +52,41 @@ Open:
 ```text
 http://127.0.0.1:8000/
 ```
+
+### Updating an existing installation
+
+Stop the running service and run the updater from the project root. On Windows
+PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
+```
+
+On macOS or Linux:
+
+```bash
+bash ./scripts/update.sh
+```
+
+In a Git clone, the updater runs `git pull --ff-only` only when tracked files
+and the index are clean. It does not delete untracked files or overwrite the
+local `.env` and `.paper-reader/` data. It then installs the pinned Python
+requirements, runs `npm ci`, rebuilds the production frontend, and verifies
+`frontend-prototype/dist/build-meta.json` against the backend
+`PROJECT_VERSION`. This version check is a hard gate: missing, invalid, or
+mismatched metadata makes the script exit non-zero, so the update has not
+succeeded. Restart the service with the command printed by the script; an old
+process cannot serve the new code.
+
+If the installation came from an archive, it has no Git metadata and the script
+deliberately cannot download a newer source tree. Download the latest
+`Paper-Reader-<version>.zip` and its matching `.zip.sha256` from GitHub Releases,
+verify the checksum, and extract the archive. Copy the existing `.env` and
+`.paper-reader/` into the new project directory as a migration (keep the old
+directory as a backup), then run the updater there. The release archive already
+contains the matching production frontend, so the updater verifies and reuses
+it without requiring Node.js. Do not copy an old `frontend-prototype/dist`
+directory into the new release.
 
 For first-time setup, open **Settings** in the top-right navigation. Built-in routes use concise provider names: GLM, DeepSeek, OpenAI, Qwen, Doubao, Anthropic, Kimi, and Codex Subscription. API-provider catalog entries use the real IDs documented by each provider, including the current Claude Fable 5 / Sonnet 5 / Opus 4.8, Kimi K2.6, Doubao Seed 2.1 Pro / Turbo, GPT-5.6 Sol, Qwen3.7, and DeepSeek V4 lines. GLM-5.2 exposes standard, deep, and fast modes; deep mode sends `reasoning_effort=max`. Qwen3.7/3.6 hybrid-thinking models switch with `enable_thinking`; deep mode leaves `thinking_budget` unset so the provider's documented model maximum applies. Kimi K2.6 and DeepSeek V4 send the real `thinking.type` field. Vision always follows the text provider and is enabled only when that service has an explicit vision model.
 

@@ -1,0 +1,159 @@
+name: Publish formal release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable V-prefixed tag to publish, for example V1.6.2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build verified release package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Check out requested tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate tag and Chinese release notes
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"V(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag):
+              raise SystemExit(f"Invalid stable release tag: {tag!r}")
+
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          tagged = subprocess.check_output(
+              ["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True
+          ).strip()
+          if head != tagged:
+              raise SystemExit(f"Checked-out commit is not the commit referenced by {tag}")
+
+          notes_path = Path("docs") / "releases" / f"{tag}.md"
+          try:
+              notes = notes_path.read_text(encoding="utf-8").strip()
+          except FileNotFoundError as exc:
+              raise SystemExit(f"Missing release notes: {notes_path}") from exc
+          if not notes or not re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", notes):
+              raise SystemExit(f"Release notes must contain Chinese content: {notes_path}")
+          PY
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend-prototype/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend-prototype ci
+
+      - name: Build versioned frontend
+        run: npm --prefix frontend-prototype run build
+
+      - name: Test release packaging guardrails
+        run: python -m unittest tests.test_build_release_package
+
+      - name: Build release ZIP and checksum
+        shell: bash
+        run: >-
+          python tools/build_release_package.py
+          --tag "$RELEASE_TAG"
+          --output-dir release-artifacts
+
+      - name: Add verified Chinese notes to publication artifact
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          shutil.copy2(Path("docs") / "releases" / f"{tag}.md", Path("release-artifacts") / f"{tag}.md")
+          PY
+
+      - name: Upload verified publication artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-release-${{ inputs.tag }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish formal GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Download verified publication artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: formal-release-${{ inputs.tag }}
+          path: release-artifacts
+
+      - name: Verify downloaded checksum
+        working-directory: release-artifacts
+        run: sha256sum --check "Paper-Reader-${RELEASE_TAG}.zip.sha256"
+
+      - name: Create or update formal GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes_file="release-artifacts/${RELEASE_TAG}.md"
+          title="Paper Reader ${RELEASE_TAG}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file "$notes_file" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file "$notes_file" \
+              --verify-tag \
+              --latest
+          fi
+          gh release upload "$RELEASE_TAG" \
+            "release-artifacts/Paper-Reader-${RELEASE_TAG}.zip" \
+            "release-artifacts/Paper-Reader-${RELEASE_TAG}.zip.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import tempfile
 import time
-import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -124,6 +124,11 @@ from utils.llm import is_llm_configured, is_vision_configured
 
 ROOT = Path(__file__).parent
 FRONTEND_DIST = ROOT / "frontend-prototype" / "dist"
+FRONTEND_BUILD_METADATA = "build-meta.json"
+FRONTEND_REBUILD_COMMANDS = (
+    "npm --prefix frontend-prototype ci；"
+    "npm --prefix frontend-prototype run build"
+)
 
 load_dotenv(
     Path(os.environ.get("PAPER_READER_ENV_PATH", ROOT / ".env")),
@@ -156,6 +161,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _frontend_build_status() -> dict[str, Any]:
+    """Read frontend build metadata without preventing API-only startup."""
+    index = FRONTEND_DIST / "index.html"
+    metadata_path = FRONTEND_DIST / FRONTEND_BUILD_METADATA
+    frontend_version: str | None = None
+    metadata_error: str | None = None
+
+    if not index.is_file():
+        metadata_error = "前端构建不存在或不完整。"
+    elif not metadata_path.is_file():
+        metadata_error = "前端构建缺少版本元数据。"
+    else:
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            candidate = metadata.get("project_version")
+            if metadata.get("schema_version") != 1:
+                metadata_error = "前端构建版本元数据格式不受支持。"
+            elif isinstance(candidate, str) and candidate.strip():
+                frontend_version = candidate.strip()
+            else:
+                metadata_error = "前端构建版本元数据无效。"
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            metadata_error = "前端构建版本元数据无法读取。"
+
+    return {
+        "dist_exists": FRONTEND_DIST.exists(),
+        "index_exists": index.is_file(),
+        "frontend_version": frontend_version,
+        "frontend_version_match": bool(
+            frontend_version and frontend_version == PROJECT_VERSION
+        ),
+        "metadata_error": metadata_error,
+    }
+
+
+def _frontend_build_error(status: dict[str, Any]) -> str:
+    """Return an actionable Chinese error for an unusable frontend build."""
+    if status["metadata_error"]:
+        reason = status["metadata_error"]
+    else:
+        reason = (
+            "前后端版本不一致："
+            f"后端为 {PROJECT_VERSION}，前端为 {status['frontend_version']}。"
+        )
+    return (
+        f"{reason} 为避免继续加载旧版界面，前端服务已暂停。"
+        "请在项目根目录依次运行："
+        f"{FRONTEND_REBUILD_COMMANDS}；然后重启服务。"
+    )
+
 
 def _section_payload(
     paper: ParsedPaper,
@@ -1026,10 +1083,18 @@ def _stream_comparison_chat_response(
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """Report whether the backend and live LLM configuration are available."""
+    frontend_status = _frontend_build_status()
     return {
-        "ok": True,
+        "ok": frontend_status["frontend_version_match"],
         "version": PROJECT_VERSION,
-        "frontend_dist": FRONTEND_DIST.exists(),
+        "frontend_dist": frontend_status["dist_exists"],
+        "frontend_version": frontend_status["frontend_version"],
+        "frontend_version_match": frontend_status["frontend_version_match"],
+        "frontend_error": (
+            None
+            if frontend_status["frontend_version_match"]
+            else _frontend_build_error(frontend_status)
+        ),
         "llm_configured": is_llm_configured(),
         "provider": text_provider_id(),
         "model": selected_text_model(),
@@ -1557,12 +1622,16 @@ if FRONTEND_DIST.exists():
 def serve_frontend(path: str) -> FileResponse:
     """Serve the built React app when `frontend-prototype/dist` exists."""
     index = FRONTEND_DIST / "index.html"
-    if not index.exists():
+    frontend_status = _frontend_build_status()
+    if not frontend_status["frontend_version_match"]:
         raise HTTPException(
-            status_code=404,
-            detail="Frontend build not found. Run `npm run build` in frontend-prototype.",
+            status_code=503,
+            detail=_frontend_build_error(frontend_status),
+            headers={"Cache-Control": "no-store"},
         )
     requested = (FRONTEND_DIST / path).resolve()
     if path and requested.is_file() and FRONTEND_DIST.resolve() in requested.parents:
+        if requested == index.resolve():
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
         return FileResponse(requested)
-    return FileResponse(index)
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})

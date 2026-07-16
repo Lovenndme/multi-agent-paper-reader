@@ -33,9 +33,6 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
 
-      - name: Run backend tests
-        run: python -m pytest -q
-
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -48,3 +45,44 @@ jobs:
 
       - name: Build frontend
         run: npm --prefix frontend-prototype run build
+
+      - name: Verify frontend and backend release versions
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from core.settings import PROJECT_VERSION
+
+          metadata_path = Path("frontend-prototype/dist/build-meta.json")
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          if metadata.get("schema_version") != 1:
+              raise SystemExit("Unsupported frontend build metadata schema")
+          frontend_version = metadata.get("project_version")
+          if frontend_version != PROJECT_VERSION:
+              raise SystemExit(
+                  "Frontend/backend release mismatch: "
+                  f"frontend={frontend_version!r}, backend={PROJECT_VERSION!r}"
+              )
+          print(f"Frontend/backend release version verified: {PROJECT_VERSION}")
+          PY
+
+      - name: Parse Windows updater
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path '.\scripts\update.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+      - name: Run backend and release-gate tests
+        run: python -m pytest -q
