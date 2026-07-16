@@ -67,20 +67,22 @@ Web Search 结果在回答下方作为“外部资料”单独显示，不与论
 
 ## 5. 论文专用工具边界
 
-下面八项不是 Codex 全部原生工具的死白名单，而是宿主额外挂载的论文数据能力边界。当调用绑定到一篇当前论文时，宿主只挂载一个临时 `paper_reader` MCP Server。模型不能传入文件路径、历史 ID 或任意坐标，只能通过该 Server 调用以下只读能力：
+下面十项不是 Codex 全部原生工具的死白名单，而是宿主额外挂载的论文数据能力边界。当调用绑定到一篇当前论文时，宿主只挂载一个临时 `paper_reader` MCP Server。模型不能传入文件路径、历史 ID 或任意坐标，只能通过该 Server 调用以下只读能力：
 
 | 工具 | 能力 | 主要限制 |
 | --- | --- | --- |
+| `paper_get_overview` | 读取标题、元数据、章节目录及图表索引 | 图表索引分页，每次最多 100 项，不返回路径或历史 ID |
 | `paper_search_evidence` | 检索原文证据 | 最多 8 条，文本长度受限 |
 | `paper_get_section` | 读取一个章节 | 标题或 1-based 编号，最多 16,000 字符 |
 | `paper_get_page` | 读取 PDF 页文本 | 每次最多 2 页 |
+| `paper_get_page_image` | 显式渲染一张完整 PDF 页面 | 每次 1 页，96-144 DPI 且像素数受限，不接受路径或 bbox |
 | `paper_get_figure` | 读取图注与视觉摘要 | 只接受 `Fxxx` ID |
 | `paper_get_table` | 读取表格 | 只接受 `Txxx`，最多 40 行 × 12 列 |
-| `paper_get_visual_region` | 渲染图/表区域 | 只允许解析器验证过的 bbox，禁止整页回退 |
+| `paper_get_visual_region` | 渲染图/表区域 | 只允许解析器验证过的 bbox，固定 144 DPI 模型预览，禁止整页回退 |
 | `paper_recall_memory` | 召回长期记忆 | 仅当前论文 LangMem 命名空间 |
 | `calculate` | 数值计算 | AST 白名单，不使用 `eval` |
 
-每轮上下文写入权限为 `0600` 的随机 capability 文件，调用结束后删除；异常遗留文件会在后续创建上下文时按时限清理。MCP 工具均声明为只读、非破坏、幂等且不访问开放世界。
+`paper_get_page_image` 是用于扫描页、公式、双栏布局和未被解析器结构化区域的显式整页阅读入口，不会被 `paper_get_visual_region` 用作缺失 bbox 时的静默回退。两项模型视觉工具都走独立的安全预览链路；供用户查看或以后下载的原生渲染器则保留源位图有效 DPI，并以 600 DPI 渲染矢量 Figure/Table，二者不会互相降档。每轮上下文写入权限为 `0600` 的随机 capability 文件，调用结束后删除；异常遗留文件会在后续创建上下文时按时限清理。分析保存时会同时持久化不含路径的只读 paper manifest，确保历史论文中的 F/T ID、图注和边界框与首次解析一致。MCP 工具均声明为只读、非破坏、幂等且不访问开放世界。
 
 ## 6. Ultra 子 Agent
 

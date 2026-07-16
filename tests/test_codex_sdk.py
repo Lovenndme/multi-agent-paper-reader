@@ -388,10 +388,28 @@ class TestCodexSDKService(unittest.TestCase):
         )
         self.assertTrue(profile["image_generation"])
         self.assertEqual(profile["native_tool_policy"], "runtime_managed_sandboxed")
+        self.assertEqual(profile["native_tools_source"], "project_policy_static")
+        self.assertEqual(profile["native_tools_scope"], "allowed_subset_not_runtime_catalog")
         self.assertEqual(profile["controlled_artifact_write"], "codex_home_generated_images")
         self.assertEqual(profile["runtime_visible_blocked_tools"], ["apply_patch"])
         self.assertEqual(profile["code_mode"], "model_required_v8")
         self.assertEqual(profile["tool_scope"], "current_paper_only")
+        self.assertEqual(
+            profile["paper_tools"],
+            [
+                "paper_get_overview",
+                "paper_search_evidence",
+                "paper_get_section",
+                "paper_get_page",
+                "paper_get_page_image",
+                "paper_get_figure",
+                "paper_get_table",
+                "paper_get_visual_region",
+                "paper_recall_memory",
+                "calculate",
+            ],
+        )
+        self.assertEqual(profile["tool_count"], 10)
         self.assertEqual(profile["standard_max_subagents"], 0)
         self.assertEqual(profile["multi_agent_enforcement"], "thread_capacity")
         self.assertFalse(profile["shell"])

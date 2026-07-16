@@ -43,7 +43,7 @@ from utils.llm import is_llm_configured, is_vision_configured, reset_llm_clients
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = Path(os.environ.get("PAPER_READER_ENV_PATH", PROJECT_ROOT / ".env"))
-PROJECT_VERSION = "V1.5.0"
+PROJECT_VERSION = "V1.6.0"
 _SETTINGS_LOCK = threading.Lock()
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 

@@ -10,6 +10,7 @@ import fitz
 
 from core.evidence import build_evidence_index, evidence_context_for_agent
 from core.pdf_parser import FigureBlock, ParsedPaper, Section, TableBlock
+from core.pdf_rendering import render_page_png
 from core.vision import (
     _figure_clip,
     _table_clip,
@@ -64,7 +65,7 @@ class TestVisionEnrichment(unittest.TestCase):
         finally:
             doc.close()
 
-        self.assertEqual(tuple(clip), (24.0, 34.0, 396.0, 244.0))
+        self.assertEqual(tuple(clip), (36.0, 66.0, 384.0, 244.0))
 
     def test_captionless_clip_uses_tight_margin(self):
         path = self._pdf()
@@ -222,6 +223,15 @@ class TestVisionEnrichment(unittest.TestCase):
         try:
             with self.assertRaisesRegex(ValueError, "no verified layout bounding box"):
                 render_figure_png(doc, FigureBlock(page=0, caption="Figure 1"))
+        finally:
+            doc.close()
+
+    def test_page_render_rejects_oversized_pixel_footprint_before_pixmap(self):
+        doc = fitz.open()
+        doc.new_page(width=20_000, height=20_000)
+        try:
+            with self.assertRaisesRegex(ValueError, "Render refused"):
+                render_page_png(doc, 0, dpi=144)
         finally:
             doc.close()
 

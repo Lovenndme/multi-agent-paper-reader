@@ -82,7 +82,7 @@ from core.comparison_history import (
     schedule_comparison_conversation_title,
 )
 from core.codex_sdk import CodexSDKError, close_codex_sdk_service, get_codex_sdk_service
-from core.codex_tools import create_codex_tool_context
+from core.codex_tools import build_codex_paper_manifest, create_codex_tool_context
 from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
 from core.history import (
     delete_paper_history,
@@ -551,6 +551,7 @@ def _stream_demo_analysis(
             pdf_data=pdf_data,
             result=result_payload,
             snippets=snippets,
+            paper_manifest=build_codex_paper_manifest(paper),
         )
     except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
         yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
@@ -749,6 +750,7 @@ def _stream_live_analysis(
             pdf_data=pdf_data,
             result=result_payload,
             snippets=snippets,
+            paper_manifest=build_codex_paper_manifest(paper),
         )
     except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
         yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
@@ -1489,6 +1491,7 @@ async def analyze_paper(
             pdf_data=data,
             result=result_payload,
             snippets=snippets,
+            paper_manifest=build_codex_paper_manifest(parsed),
         )
     except Exception as exc:  # noqa: BLE001 - return analysis with an actionable warning
         result_payload["history_id"] = None

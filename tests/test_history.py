@@ -44,6 +44,7 @@ class TestPaperHistory(unittest.TestCase):
             pdf_data=b"%PDF-1.7 test paper",
             result=_result("Persistent Paper"),
             snippets=[_snippet("complete source evidence")],
+            paper_manifest={"version": 1, "paper": {"title": "Persistent Paper"}},
         )
 
         items = list_paper_history()
@@ -55,6 +56,8 @@ class TestPaperHistory(unittest.TestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["result"]["summary_output"]["one_sentence_summary"], "summary")
         self.assertEqual(loaded["snippets"][0].text, "complete source evidence")
+        self.assertEqual(loaded["paper_manifest"]["paper"]["title"], "Persistent Paper")
+        self.assertNotIn("_codex_paper_manifest", loaded["result"])
 
     def test_database_context_closes_connection_after_success(self):
         with history_database_connection() as connection:

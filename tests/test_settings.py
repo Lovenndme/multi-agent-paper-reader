@@ -311,7 +311,7 @@ class TestApplicationSettings(unittest.TestCase):
 
             self.assertFalse(env_path.exists())
 
-    def test_validated_key_is_saved_and_activated(self):
+    def test_validated_key_is_saved_and_reported_for_glm(self):
         previous_key = os.environ.get("GLM_API_KEY")
         try:
             with tempfile.TemporaryDirectory() as tempdir:
@@ -325,7 +325,8 @@ class TestApplicationSettings(unittest.TestCase):
                         env_path=env_path,
                     )
 
-                self.assertTrue(payload["api_key_configured"])
+                glm_status = next(item for item in payload["providers"] if item["id"] == "zhipu")
+                self.assertTrue(glm_status["configured"])
                 self.assertIn("GLM_API_KEY='test-key-that-is-long-enough'", env_path.read_text())
                 if os.name != "nt":
                     self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)

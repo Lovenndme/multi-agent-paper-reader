@@ -27,6 +27,7 @@ def save_paper_analysis(
     pdf_data: bytes,
     result: dict[str, Any],
     snippets: list[EvidenceSnippet],
+    paper_manifest: dict[str, Any] | None = None,
 ) -> str:
     """Insert or replace one PDF analysis and return its stable history ID."""
     if not pdf_data:
@@ -40,6 +41,8 @@ def save_paper_analysis(
     stored_result = dict(result)
     stored_result.pop("analysis_id", None)
     stored_result.pop("history_id", None)
+    if isinstance(paper_manifest, dict):
+        stored_result["_codex_paper_manifest"] = paper_manifest
     evidence_json = json.dumps(
         [asdict(snippet) for snippet in snippets],
         ensure_ascii=False,
@@ -127,6 +130,7 @@ def load_paper_analysis(history_id: str) -> dict[str, Any] | None:
         return None
 
     result = json.loads(str(row["result_json"]))
+    paper_manifest = result.pop("_codex_paper_manifest", None)
     raw_snippets = json.loads(str(row["evidence_json"]))
     snippets = [
         EvidenceSnippet(**item)
@@ -137,6 +141,7 @@ def load_paper_analysis(history_id: str) -> dict[str, Any] | None:
         "history": _history_row(row),
         "result": result,
         "snippets": snippets,
+        "paper_manifest": paper_manifest if isinstance(paper_manifest, dict) else None,
     }
 
 

@@ -56,7 +56,7 @@ http://127.0.0.1:8000/
 
 只有账号实时 `model/list` 返回才是路由依据。登录账号真实返回时，项目仅保留 `gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna`；目录失败、为空或不包含某模型时，不会静默回退到过期/静态模型。Settings 始终展示 `low`、`medium`、`high`、`xhigh`、`max`、`ultra` 六个推理位置，并禁用所选模型没有返回的档位。当前实测目录中 Sol、Terra 支持六档，Luna 支持前五档并明确禁用 Ultra。
 
-Codex 可用于专职 Agent、结构化总结、单篇/多篇论文追问、会话标题、图表摘要及 JSON Schema 记忆更新。每次调用都使用隔离的临时线程、拒绝审批、只读沙箱，并关闭 Codex 历史持久化。所选模型和固定版本 runtime 支持时，原生 Web Search、规划、工具发现、图像查看与图像生成均予以保留；联网来源会与论文原文证据分开展示，图像生成只在用户明确提出时使用。绑定单篇论文的调用还会获得八个宿主提供的只读论文工具：论文证据检索、章节/页读取、图/表元数据、仅限解析器已验证区域的视觉裁剪、当前论文记忆召回和受限计算器。集成会禁用继承的 MCP Server、Apps、Plugins、Hooks、Memories、技能注入、安装建议、交互式提问、Shell、统一执行与任意文件写入，并在启动 SDK 前检查最终 MCP 目录，隔离失败即拒绝启动。生成图片是唯一受控写入例外，由官方 runtime 保存到本机 `CODEX_HOME/generated_images` 目录。Ultra 最多创建两个一层子 Agent；其余五档的线程容量固定为 1，因此即使模型元数据声明了协作工具也无法真正创建子线程。安全边界参见官方[审批与沙箱说明](https://learn.chatgpt.com/docs/agent-approvals-security)和 [MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)。
+Codex 可用于专职 Agent、结构化总结、单篇/多篇论文追问、会话标题、图表摘要及 JSON Schema 记忆更新。每次调用都使用隔离的临时线程、拒绝审批、只读沙箱，并关闭 Codex 历史持久化。所选模型和固定版本 runtime 支持时，原生 Web Search、规划、工具发现、图像查看与图像生成均予以保留；联网来源会与论文原文证据分开展示，图像生成只在用户明确提出时使用。绑定单篇论文的调用还会获得十个宿主提供的只读论文工具：论文概览与图表索引、论文证据检索、章节/页文本读取、显式单页图像、图/表元数据、仅限解析器已验证区域的视觉裁剪、当前论文记忆召回和受限计算器。集成会禁用继承的 MCP Server、Apps、Plugins、Hooks、Memories、技能注入、安装建议、交互式提问、Shell、统一执行与任意文件写入，并在启动 SDK 前检查最终 MCP 目录，隔离失败即拒绝启动。生成图片是唯一受控写入例外，由官方 runtime 保存到本机 `CODEX_HOME/generated_images` 目录。Ultra 最多创建两个一层子 Agent；其余五档的线程容量固定为 1，因此即使模型元数据声明了协作工具也无法真正创建子线程。安全边界参见官方[审批与沙箱说明](https://learn.chatgpt.com/docs/agent-approvals-security)和 [MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)。
 
 该路由只适用于通过 loopback 地址访问的可信本机单用户应用，不是公网多用户认证方案，不能让远程访客消耗机器所有者的 ChatGPT 订阅。登录/退出接口同时校验 loopback 客户端、loopback Host 和浏览器同源请求，以防跨站调用与 DNS 重绑定。若要公开或多人部署，应使用常规厂商 API 凭据，并自行实现用户认证、额度与计费。
 
@@ -66,7 +66,7 @@ Settings 还提供“自定义中转站”。用户必须明确选择 `OpenAI-co
 
 默认路由仍为智谱 `glm-5.2` 文本模型，并自动配对 `glm-5v-turbo` 视觉模型。也可以将 `.env.example` 复制为 `.env`，手动配置 `TEXT_PROVIDER`、`MODEL_NAME` 以及相应厂商的 Key。为兼容旧配置，`VISION_PROVIDER` 仍会被读取，但运行时会强制归一为 `TEXT_PROVIDER`；内置厂商使用目录中的推荐视觉模型，自定义中转站使用用户明确填写的视觉模型 ID。Agent 生成温度由 `LLM_TEMPERATURE` 控制；基于证据的论文追问使用独立的低温配置 `CHAT_TEMPERATURE`，默认值为 `0.25`。`CHAT_INPUT_TOKEN_BUDGET` 用于设置证据、近期对话和长期记忆共享的保守动态输入预算，默认值为 `48000`。
 
-如需理解论文中的图像和图表，请设置 `ENABLE_VISION_SUMMARY=true`，并选择带有官方托管视觉模型的文本厂商。后端使用 PyMuPDF4LLM Layout 区分正文、公式、表格、图注和 picture 区域；picture 同时覆盖嵌入位图与 PDF 矢量图。图注通过同页几何位置与 picture 配对，不再按两个无关列表的序号硬配；视觉模型只接收具有已验证 bbox 的精确裁剪，找不到区域时会跳过，绝不会静默退化成整页截图。失败图像会自动使用更小的 `VISION_RETRY_WORKERS` 并发池重试。
+如需理解论文中的图像和图表，请设置 `ENABLE_VISION_SUMMARY=true`，并选择带有官方托管视觉模型的文本厂商。后端使用 PyMuPDF4LLM Layout 区分正文、公式、表格、图注和 picture 区域；picture 同时覆盖嵌入位图与 PDF 矢量图。图注通过同页几何位置与 picture 配对，不再按两个无关列表的序号硬配；视觉模型只接收具有已验证 bbox、经 120-144 DPI 安全预览链路渲染的精确裁剪，找不到区域时会跳过，绝不会静默退化成整页截图。原生/用户导出链路与模型预览相互独立：位图 Figure 至少保留相交源图的最高有效分辨率，矢量 Figure 和 Table 使用 600 DPI 质量底线；超过安全像素上限时明确拒绝，不会静默降采样。失败图像会自动使用更小的 `VISION_RETRY_WORKERS` 并发池重试。
 
 ## CLI 快速开始
 

@@ -16,10 +16,15 @@ from typing import Any, Iterable
 
 import fitz
 
-from core.evidence import EvidenceSnippet
+from core.evidence import EvidenceSnippet, build_evidence_index
 from core.history import load_paper_analysis, retained_paper_pdf_path
 from core.pdf_parser import FigureBlock, ParsedPaper, TableBlock, parse_pdf
-from core.vision import render_figure_png, render_table_png
+from core.pdf_rendering import (
+    plan_figure_preview_render,
+    plan_table_preview_render,
+    render_page_preview_png,
+    render_planned_png,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +32,7 @@ _CONTEXT_ENV = "PAPER_READER_CODEX_CONTEXT_FILE"
 _MAX_CONTEXT_BYTES = 16 * 1024 * 1024
 _MAX_TOOL_TEXT = 16_000
 _MAX_VISUAL_BYTES = 4 * 1024 * 1024
+_MAX_OVERVIEW_ASSETS = 100
 _CONTEXT_MAX_AGE_SECONDS = 6 * 60 * 60
 _SAFE_CONTEXT_NAME = re.compile(r"^[0-9a-f]{48}\.json$")
 _SAFE_EVIDENCE_ID = re.compile(r"^[ETF]\d{3,6}$", re.IGNORECASE)
@@ -64,18 +70,28 @@ def create_codex_tool_context(
     paper: ParsedPaper | None = None,
     pdf_path: str | Path | None = None,
     history_id: str | None = None,
+    manifest: dict[str, Any] | None = None,
 ) -> CodexToolContextHandle:
     """Create one private capability file owned by the current paper turn."""
     safe_pdf = _trusted_pdf_path(pdf_path)
+    analysis = _bounded_analysis_context(context or {})
+    raw_manifest = (
+        build_codex_paper_manifest(paper)
+        if paper is not None
+        else manifest or _manifest_from_analysis(analysis)
+    )
+    bounded_manifest = _bounded_paper_manifest(raw_manifest)
     payload: dict[str, Any] = {
         "version": 1,
         "history_id": history_id if history_id and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", history_id) else None,
         "pdf_path": str(safe_pdf) if safe_pdf else None,
         "snippets": [_bounded_snippet(snippet) for snippet in list(snippets)[:800]],
-        "analysis": _bounded_analysis_context(context or {}),
+        "analysis": analysis,
+        "paper": bounded_manifest["paper"],
+        "section_index": bounded_manifest["section_index"],
         "sections": [],
-        "tables": [],
-        "figures": [],
+        "tables": bounded_manifest["tables"],
+        "figures": bounded_manifest["figures"],
     }
     if paper is not None:
         payload["sections"] = [
@@ -87,14 +103,6 @@ def create_codex_tool_context(
                 "page_end": int(section.page_end),
             }
             for section in paper.sections[:300]
-        ]
-        payload["tables"] = [
-            _bounded_table(table, index)
-            for index, table in enumerate(paper.tables[:500], start=1)
-        ]
-        payload["figures"] = [
-            _bounded_figure(figure, index)
-            for index, figure in enumerate(paper.figures[:500], start=1)
         ]
 
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -130,11 +138,22 @@ def create_codex_tool_context_from_history(history_id: str) -> CodexToolContextH
     stored = load_paper_analysis(history_id)
     if stored is None:
         raise PaperToolError("已保存论文不存在。")
+    pdf_path = retained_paper_pdf_path(history_id)
+    manifest = stored.get("paper_manifest")
+    paper: ParsedPaper | None = None
+    snippets = stored["snippets"]
+    if not isinstance(manifest, dict) and pdf_path is not None:
+        paper = parse_pdf(pdf_path)
+        snippets = build_evidence_index(paper)
+        manifest = build_codex_paper_manifest(paper)
+        manifest["paper"]["legacy_reparsed"] = True
     return create_codex_tool_context(
-        snippets=stored["snippets"],
+        snippets=snippets,
         context=stored["result"],
-        pdf_path=retained_paper_pdf_path(history_id),
+        paper=paper,
+        pdf_path=pdf_path,
         history_id=history_id,
+        manifest=manifest if isinstance(manifest, dict) else None,
     )
 
 
@@ -150,6 +169,8 @@ def validate_codex_tool_context_path(value: str | Path) -> Path:
         raise PaperToolError("论文工具上下文标识无效。")
     if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > _MAX_CONTEXT_BYTES:
         raise PaperToolError("论文工具上下文文件无效。")
+    if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
+        raise PaperToolError("论文工具上下文所有者无效。")
     if file_stat.st_mode & 0o077:
         raise PaperToolError("论文工具上下文权限不安全。")
     return path
@@ -168,6 +189,114 @@ def load_bound_context() -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("version") != 1:
         raise PaperToolError("论文工具上下文版本无效。")
     return payload
+
+
+def build_codex_paper_manifest(paper: ParsedPaper) -> dict[str, Any]:
+    """Serialize stable, path-free paper navigation and visual records for history."""
+    page_count = max(
+        [section.page_end + 1 for section in paper.sections]
+        + [table.page + 1 for table in paper.tables]
+        + [figure.page + 1 for figure in paper.figures]
+        + [0]
+    )
+    return {
+        "version": 1,
+        "paper": {
+            "title": str(paper.title or "Untitled Paper")[:1_000],
+            "page_count": page_count,
+            "parser_backend": str(paper.metadata.get("parser_backend") or "")[:100],
+            "metadata": _bounded_paper_metadata(paper.metadata),
+            "legacy_reparsed": False,
+        },
+        "section_index": [
+            {
+                "index": index,
+                "title": str(section.title or "Untitled section")[:500],
+                "page_start": max(0, int(section.page_start)),
+                "page_end": max(0, int(section.page_end)),
+                "chars": len(str(section.content or "")),
+            }
+            for index, section in enumerate(paper.sections[:300], start=1)
+        ],
+        "tables": [
+            _bounded_table(table, index)
+            for index, table in enumerate(paper.tables[:500], start=1)
+        ],
+        "figures": [
+            _bounded_figure(figure, index)
+            for index, figure in enumerate(paper.figures[:500], start=1)
+        ],
+    }
+
+
+def paper_get_overview(
+    *,
+    asset_offset: int = 0,
+    asset_limit: int = 50,
+) -> dict[str, Any]:
+    """Return bounded paper metadata, section outline, and discoverable F/T assets."""
+    context = load_bound_context()
+    paper = context.get("paper") if isinstance(context.get("paper"), dict) else {}
+    sections = (
+        context.get("section_index")
+        if isinstance(context.get("section_index"), list)
+        else []
+    )
+    figures = context.get("figures") if isinstance(context.get("figures"), list) else []
+    tables = context.get("tables") if isinstance(context.get("tables"), list) else []
+    assets: list[dict[str, Any]] = []
+    for kind, records in (("figure", figures), ("table", tables)):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            assets.append(
+                {
+                    "id": str(record.get("id") or "")[:16],
+                    "kind": kind,
+                    "page": max(0, int(record.get("page", 0))) + 1,
+                    "caption": str(record.get("caption") or "")[:800],
+                    "bbox_verified": _bbox(record.get("bbox")) is not None,
+                }
+            )
+    assets.sort(key=lambda item: (item["page"], item["kind"], item["id"]))
+    offset = max(0, min(int(asset_offset), len(assets)))
+    limit = max(1, min(int(asset_limit), _MAX_OVERVIEW_ASSETS))
+    selected = assets[offset : offset + limit]
+    next_offset = offset + len(selected) if offset + len(selected) < len(assets) else None
+    page_count = _nonnegative_int(paper.get("page_count"))
+    if context.get("pdf_path"):
+        document = fitz.open(str(_context_pdf(context)))
+        try:
+            page_count = document.page_count
+        finally:
+            document.close()
+    return {
+        "title": str(paper.get("title") or "Untitled Paper")[:1_000],
+        "page_count": page_count,
+        "parser_backend": str(paper.get("parser_backend") or "")[:100],
+        "metadata": _bounded_paper_metadata(paper.get("metadata")),
+        "sections": [
+            {
+                "index": max(1, int(section.get("index", index))),
+                "title": str(section.get("title") or "Untitled section")[:500],
+                "page_start": max(0, int(section.get("page_start", 0))) + 1,
+                "page_end": max(0, int(section.get("page_end", 0))) + 1,
+                "chars": max(0, int(section.get("chars", 0))),
+            }
+            for index, section in enumerate(sections[:300], start=1)
+            if isinstance(section, dict)
+        ],
+        "counts": {
+            "sections": len(sections),
+            "figures": len(figures),
+            "tables": len(tables),
+        },
+        "assets": selected,
+        "asset_offset": offset,
+        "next_asset_offset": next_offset,
+        "assets_truncated": next_offset is not None,
+        "legacy_reparsed": bool(paper.get("legacy_reparsed")),
+    }
 
 
 def paper_search_evidence(
@@ -266,6 +395,41 @@ def paper_get_page(page: int, *, page_count: int = 1, max_chars: int = 12_000) -
     }
 
 
+def paper_get_page_image(page: int, *, dpi: int = 120) -> tuple[dict[str, Any], bytes]:
+    """Render one explicitly requested page; never acts as a visual-region fallback."""
+    context = load_bound_context()
+    pdf_path = _context_pdf(context)
+    requested_page = int(page)
+    bounded_dpi = max(96, min(int(dpi), 144))
+    if requested_page < 1:
+        raise PaperToolError("页码必须从 1 开始。")
+    document = fitz.open(str(pdf_path))
+    try:
+        if requested_page > document.page_count:
+            raise PaperToolError("请求页码超出论文范围。")
+        page_object = document[requested_page - 1]
+        width_points = float(page_object.rect.width)
+        height_points = float(page_object.rect.height)
+        try:
+            png = render_page_preview_png(document, requested_page - 1, dpi=bounded_dpi)
+        except ValueError as exc:
+            raise PaperToolError("该 PDF 页面超过安全渲染范围。") from exc
+        page_count = document.page_count
+    finally:
+        document.close()
+    if len(png) > _MAX_VISUAL_BYTES:
+        raise PaperToolError("整页图像超过安全大小限制。")
+    return {
+        "page": requested_page,
+        "page_count": page_count,
+        "width_points": round(width_points, 2),
+        "height_points": round(height_points, 2),
+        "dpi": bounded_dpi,
+        "media_type": "image/png",
+        "bytes": len(png),
+    }, png
+
+
 def paper_get_figure(figure_id: str) -> dict[str, Any]:
     """Return bounded caption/summary metadata for one Fxxx visual."""
     evidence_id = _validated_evidence_id(figure_id, prefix="F")
@@ -322,14 +486,11 @@ def paper_get_visual_region(region_id: str) -> tuple[dict[str, Any], bytes]:
     prefix = evidence_id[0]
     records_key = "figures" if prefix == "F" else "tables"
     record = _record_by_id(context.get(records_key), evidence_id)
-    if record is None or not record.get("bbox"):
-        parsed = parse_pdf(pdf_path)
-        records = parsed.figures if prefix == "F" else parsed.tables
-        index = int(evidence_id[1:]) - 1
-        if index < 0 or index >= len(records):
-            raise PaperToolError("视觉区域不存在。")
-        item = records[index]
-    elif prefix == "F":
+    if record is None:
+        raise PaperToolError("视觉区域不存在。")
+    if not record.get("bbox"):
+        raise PaperToolError("该视觉区域没有经过验证的边界框，已拒绝整页回退。")
+    if prefix == "F":
         item = FigureBlock(
             page=int(record.get("page", 0)),
             caption=str(record.get("caption") or ""),
@@ -350,20 +511,31 @@ def paper_get_visual_region(region_id: str) -> tuple[dict[str, Any], bytes]:
         raise PaperToolError("该视觉区域没有经过验证的边界框，已拒绝整页回退。")
     document = fitz.open(str(pdf_path))
     try:
-        png = (
-            render_figure_png(document, item, dpi=120)
-            if prefix == "F"
-            else render_table_png(document, item, dpi=120)
-        )
+        try:
+            if item.page < 0 or item.page >= document.page_count:
+                raise ValueError("Visual region page is outside the retained PDF.")
+            page = document[item.page]
+            plan = (
+                plan_figure_preview_render(page, item, dpi=144)
+                if prefix == "F"
+                else plan_table_preview_render(page, item, dpi=144)
+            )
+            png = render_planned_png(page, plan)
+        except ValueError as exc:
+            raise PaperToolError("该视觉区域超过安全渲染范围。") from exc
     finally:
         document.close()
     if len(png) > _MAX_VISUAL_BYTES:
-        raise PaperToolError("视觉区域超过安全大小限制。")
+        raise PaperToolError("视觉区域预览超过安全大小限制。")
     metadata = {
         "id": evidence_id,
         "kind": "figure" if prefix == "F" else "table",
         "page": int(item.page) + 1,
         "caption": str(getattr(item, "caption", "") or "")[:4000],
+        "dpi": plan.dpi,
+        "width_px": plan.width_px,
+        "height_px": plan.height_px,
+        "quality": plan.policy,
         "media_type": "image/png",
         "bytes": len(png),
     }
@@ -534,6 +706,136 @@ def _bounded_analysis_context(context: dict[str, Any]) -> dict[str, Any]:
         "evidence_index",
     }
     return {key: context[key] for key in allowed if key in context}
+
+
+def _manifest_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    paper = analysis.get("paper") if isinstance(analysis.get("paper"), dict) else {}
+    metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
+    return {
+        "version": 1,
+        "paper": {
+            "title": str(paper.get("title") or "Untitled Paper")[:1_000],
+            "page_count": _nonnegative_int(paper.get("pages")),
+            "parser_backend": str(metadata.get("parser_backend") or "")[:100],
+            "metadata": metadata,
+            "legacy_reparsed": False,
+        },
+        "section_index": paper.get("sections") if isinstance(paper.get("sections"), list) else [],
+        "tables": [],
+        "figures": [],
+    }
+
+
+def _bounded_paper_manifest(value: Any) -> dict[str, Any]:
+    manifest = value if isinstance(value, dict) else {}
+    paper = manifest.get("paper") if isinstance(manifest.get("paper"), dict) else {}
+    section_records = (
+        manifest.get("section_index")
+        if isinstance(manifest.get("section_index"), list)
+        else []
+    )
+    table_records = manifest.get("tables") if isinstance(manifest.get("tables"), list) else []
+    figure_records = manifest.get("figures") if isinstance(manifest.get("figures"), list) else []
+
+    sections = [
+        {
+            "index": index,
+            "title": str(record.get("title") or "Untitled section")[:500],
+            "page_start": _nonnegative_int(record.get("page_start")),
+            "page_end": max(
+                _nonnegative_int(record.get("page_start")),
+                _nonnegative_int(record.get("page_end")),
+            ),
+            "chars": _nonnegative_int(record.get("chars")),
+        }
+        for index, record in enumerate(section_records[:300], start=1)
+        if isinstance(record, dict)
+    ]
+    tables = [
+        _bounded_manifest_table(record, index)
+        for index, record in enumerate(table_records[:500], start=1)
+        if isinstance(record, dict)
+    ]
+    figures = [
+        _bounded_manifest_figure(record, index)
+        for index, record in enumerate(figure_records[:500], start=1)
+        if isinstance(record, dict)
+    ]
+    derived_pages = max(
+        [record["page_end"] + 1 for record in sections]
+        + [record["page"] + 1 for record in tables]
+        + [record["page"] + 1 for record in figures]
+        + [0]
+    )
+    return {
+        "version": 1,
+        "paper": {
+            "title": str(paper.get("title") or "Untitled Paper")[:1_000],
+            "page_count": max(_nonnegative_int(paper.get("page_count")), derived_pages),
+            "parser_backend": str(paper.get("parser_backend") or "")[:100],
+            "metadata": _bounded_paper_metadata(paper.get("metadata")),
+            "legacy_reparsed": bool(paper.get("legacy_reparsed")),
+        },
+        "section_index": sections,
+        "tables": tables,
+        "figures": figures,
+    }
+
+
+def _bounded_manifest_table(record: dict[str, Any], index: int) -> dict[str, Any]:
+    rows = record.get("rows") if isinstance(record.get("rows"), list) else []
+    bounded_rows = [
+        [str(cell)[:1_000] for cell in row[:12]]
+        for row in rows[:40]
+        if isinstance(row, list)
+    ]
+    return {
+        "id": _manifest_evidence_id(record.get("id"), "T", index),
+        "page": _nonnegative_int(record.get("page")),
+        "rows": bounded_rows,
+        "rows_truncated": bool(record.get("rows_truncated"))
+        or len(rows) > len(bounded_rows)
+        or any(isinstance(row, list) and len(row) > 12 for row in rows[:40]),
+        "caption": str(record.get("caption") or "")[:4_000],
+        "bbox": _bbox(record.get("bbox")),
+        "caption_bbox": _bbox(record.get("caption_bbox")),
+    }
+
+
+def _bounded_manifest_figure(record: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "id": _manifest_evidence_id(record.get("id"), "F", index),
+        "page": _nonnegative_int(record.get("page")),
+        "caption": str(record.get("caption") or "")[:4_000],
+        "image_index": _nonnegative_int(record.get("image_index")),
+        "bbox": _bbox(record.get("bbox")),
+        "caption_bbox": _bbox(record.get("caption_bbox")),
+        "visual_summary": str(record.get("visual_summary") or "")[:6_000],
+    }
+
+
+def _bounded_paper_metadata(value: Any) -> dict[str, str]:
+    metadata = value if isinstance(value, dict) else {}
+    allowed_keys = ("author", "subject", "keywords", "creationDate", "modDate")
+    return {
+        key: str(metadata[key])[:1_000]
+        for key in allowed_keys
+        if metadata.get(key) not in (None, "")
+    }
+
+
+def _manifest_evidence_id(value: Any, prefix: str, index: int) -> str:
+    candidate = str(value or "").upper()
+    if _SAFE_EVIDENCE_ID.fullmatch(candidate) and candidate.startswith(prefix):
+        return candidate
+    return f"{prefix}{index:03d}"
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _bounded_snippet(snippet: EvidenceSnippet) -> dict[str, Any]:

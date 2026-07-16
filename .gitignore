@@ -15,4 +15,5 @@ frontend-prototype/output/
 frontend-prototype/.npm-cache/
 test-paper*.pdf
 vision_ab_outputs/
+output/
 .paper-reader/

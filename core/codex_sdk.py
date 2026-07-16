@@ -35,9 +35,11 @@ _SUPPORTED_MODELS = (
 )
 _SUPPORTED_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 _PAPER_TOOL_NAMES = (
+    "paper_get_overview",
     "paper_search_evidence",
     "paper_get_section",
     "paper_get_page",
+    "paper_get_page_image",
     "paper_get_figure",
     "paper_get_table",
     "paper_get_visual_region",
@@ -652,6 +654,8 @@ def _security_profile() -> dict[str, Any]:
         "filesystem_write": False,
         "native_tools": list(_NATIVE_TOOL_CAPABILITIES),
         "native_tool_policy": "runtime_managed_sandboxed",
+        "native_tools_source": "project_policy_static",
+        "native_tools_scope": "allowed_subset_not_runtime_catalog",
         "code_mode": "model_required_v8",
         "view_image": True,
         "image_generation": True,

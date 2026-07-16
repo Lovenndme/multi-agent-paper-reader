@@ -1291,7 +1291,6 @@ function SettingsDialog({
                 <header>
                   <div>
                     <h3>Codex 订阅</h3>
-                    <small>复用本机 ChatGPT 登录，无需 API Key</small>
                   </div>
                   <span className={`codex-plan-badge ${codexStatus?.authenticated ? "connected" : ""}`}>
                     {codexStatus?.authenticated
@@ -1303,14 +1302,14 @@ function SettingsDialog({
                   <span className="codex-subscription-icon"><IconSparkles size={20} stroke={1.8} /></span>
                   <div>
                     <strong>{codexStatus?.message || "正在等待 Codex SDK 状态"}</strong>
-                    <small>
-                      {codexStatus?.authenticated
-                        ? codexModels.length
-                          ? `已读取 ${codexModels.length} 个 GPT-5.6 订阅模型；分析使用临时线程、只读沙箱、Web Search 与安全论文工具。`
-                          : codexStatus?.model_catalog_message
+                    {(!codexStatus?.authenticated || !codexModels.length) && (
+                      <small>
+                        {codexStatus?.authenticated
+                          ? codexStatus?.model_catalog_message
                             || "订阅已连接，但当前账号没有可用的 GPT-5.6 模型。"
-                        : "连接后，论文 Agent、追问、对比和图表理解可以使用账号包含的 Codex 额度。"}
-                    </small>
+                          : "连接后，论文 Agent、追问、对比和图表理解可以使用账号包含的 Codex 额度。"}
+                      </small>
+                    )}
                   </div>
                   <div className="codex-card-actions">
                     <button
@@ -1362,14 +1361,15 @@ function SettingsDialog({
                   </div>
                   <div className={`settings-health-card ${compatibilityTone}`}>
                     <div><strong>版本兼容</strong><span><i />{codexStatus?.compatibility === "ok" ? "兼容" : "需处理"}</span></div>
-                    <small>{codexStatus?.compatibility_message || "正在等待兼容性检查。"}</small>
+                    {codexStatus?.compatibility !== "ok" && (
+                      <small>{codexStatus?.compatibility_message || "正在等待兼容性检查。"}</small>
+                    )}
                   </div>
                 </div>
                 {securityItems.length > 0 && (
                   <div className="codex-security-profile">
                     <header>
                       <div><IconShieldCheck size={15} /><strong>安全运行权限</strong></div>
-                      <small>由本机后端实时报告</small>
                     </header>
                     <div className="codex-security-badges">
                       {securityItems.map((item) => (
@@ -1377,7 +1377,11 @@ function SettingsDialog({
                           className={`${item.enabled ? "enabled" : "unavailable"}${item.blocked ? " blocked" : ""}${item.special ? " special" : ""}`}
                           key={item.label}
                         >
-                          {item.enabled ? <IconCheck size={12} /> : <IconX size={12} />}{item.label}
+                          {item.blocked
+                            ? <IconX size={12} />
+                            : item.enabled
+                              ? <IconCheck size={12} />
+                              : <IconX size={12} />}{item.label}
                         </span>
                       ))}
                     </div>
@@ -1391,11 +1395,10 @@ function SettingsDialog({
                     )}
                     {codexStatus?.security_profile?.native_tools?.length > 0 && (
                       <details className="codex-tool-details">
-                        <summary>查看 Codex 原生能力</summary>
+                        <summary>查看本项目保留的 Codex 原生能力</summary>
                         <div>
                           {codexStatus.security_profile.native_tools.map((tool) => <code key={tool}>{tool}</code>)}
                         </div>
-                        <small>`exec`/`wait` 是 5.6 模型要求的无 Node、无直接文件系统或网络的 V8 编排层；普通文件操作受只读沙箱约束，图像生成仅写入 Codex 本机生成目录。</small>
                       </details>
                     )}
                   </div>

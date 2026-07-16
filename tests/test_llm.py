@@ -70,6 +70,8 @@ class TestStructuredOutputParsing(unittest.TestCase):
         with (
             patch.dict(os.environ, {"CHAT_TEMPERATURE": "0.2"}),
             patch("utils.llm.get_api_key", return_value="test-key"),
+            patch("utils.llm.text_provider_id", return_value="zhipu"),
+            patch("utils.llm.selected_text_model", return_value="glm-5.2"),
         ):
             chat_llm = get_chat_llm()
 

@@ -39,6 +39,16 @@ def _call(function: Callable[..., ResultT], *args: Any, **kwargs: Any) -> Result
 
 
 @mcp.tool(annotations=READ_ONLY, structured_output=True)
+def paper_get_overview(asset_offset: int = 0, asset_limit: int = 50) -> dict[str, Any]:
+    """Read paper metadata, section outline, and a paginated figure/table index."""
+    return _call(
+        codex_tools.paper_get_overview,
+        asset_offset=asset_offset,
+        asset_limit=asset_limit,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY, structured_output=True)
 def paper_search_evidence(
     query: str,
     kinds: list[str] | None = None,
@@ -63,6 +73,16 @@ def paper_get_page(page: int, page_count: int = 1, max_chars: int = 12_000) -> d
         page_count=page_count,
         max_chars=max_chars,
     )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def paper_get_page_image(page: int, dpi: int = 120) -> list[Any]:
+    """Render one explicit 1-based page without accepting a path, bbox, or page range."""
+    metadata, png = _call(codex_tools.paper_get_page_image, page, dpi=dpi)
+    return [
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+        Image(data=png, format="png"),
+    ]
 
 
 @mcp.tool(annotations=READ_ONLY, structured_output=True)
