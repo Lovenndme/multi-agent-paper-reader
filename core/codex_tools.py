@@ -171,7 +171,10 @@ def validate_codex_tool_context_path(value: str | Path) -> Path:
         raise PaperToolError("论文工具上下文文件无效。")
     if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
         raise PaperToolError("论文工具上下文所有者无效。")
-    if file_stat.st_mode & 0o077:
+    # Windows reports synthetic POSIX mode bits (typically 0o666) that do not
+    # describe the file's ACL.  The file inherits the current user's protected
+    # data-directory ACL there; enforce Unix owner-only bits only on POSIX.
+    if os.name != "nt" and file_stat.st_mode & 0o077:
         raise PaperToolError("论文工具上下文权限不安全。")
     return path
 

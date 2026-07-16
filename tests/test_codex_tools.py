@@ -91,7 +91,8 @@ class TestCodexPaperTools(unittest.TestCase):
         with patch.dict(os.environ, {"PAPER_READER_DATA_DIR": str(self.data_dir)}, clear=False):
             handle = self._context()
             try:
-                self.assertEqual(handle.path.stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual(handle.path.stat().st_mode & 0o777, 0o600)
                 with patch.dict(
                     os.environ,
                     {"PAPER_READER_CODEX_CONTEXT_FILE": str(handle.path)},
