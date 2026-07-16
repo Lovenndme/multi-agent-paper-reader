@@ -389,6 +389,8 @@ class CodexSDKService:
         image_bytes: bytes | None = None,
         image_media_type: str = "image/png",
         on_token: Callable[[str], None] | None = None,
+        on_reasoning_summary: Callable[[str, str], None] | None = None,
+        on_activity: Callable[[str, str], None] | None = None,
         timeout: float | None = None,
         tool_context_path: str | Path | None = None,
     ) -> CodexTurnResult:
@@ -428,6 +430,7 @@ class CodexSDKService:
                     sdk["TextInput"](prompt),
                     sdk["ImageInput"](f"data:{image_media_type};base64,{encoded}"),
                 ]
+            summary_factory = sdk.get("ReasoningSummary")
             turn = thread.turn(
                 turn_input,
                 approval_mode=sdk["ApprovalMode"].deny_all,
@@ -435,12 +438,15 @@ class CodexSDKService:
                 effort=normalized_effort,
                 output_schema=output_schema,
                 sandbox=sdk["Sandbox"].read_only,
+                summary=summary_factory("concise") if summary_factory else None,
             )
             return _consume_turn(
                 turn,
                 model=model,
                 effort=effort,
                 on_token=on_token,
+                on_reasoning_summary=on_reasoning_summary,
+                on_activity=on_activity,
                 timeout=_bounded_timeout(timeout),
             )
         except CodexSDKError:
@@ -528,6 +534,8 @@ def _consume_turn(
     model: str,
     on_token: Callable[[str], None] | None,
     timeout: float,
+    on_reasoning_summary: Callable[[str, str], None] | None = None,
+    on_activity: Callable[[str, str], None] | None = None,
     effort: str | None = None,
 ) -> CodexTurnResult:
     timed_out = threading.Event()
@@ -558,6 +566,11 @@ def _consume_turn(
                     deltas.append(token)
                     if on_token:
                         on_token(token)
+            elif event.method == "item/reasoning/summaryTextDelta":
+                delta = str(getattr(event.payload, "delta", "") or "")
+                if delta and on_reasoning_summary:
+                    summary_index = int(getattr(event.payload, "summary_index", 0) or 0)
+                    on_reasoning_summary(delta, f"reasoning-{summary_index}")
             elif event.method == "item/completed":
                 item = getattr(event.payload, "item", None)
                 root = getattr(item, "root", item)
@@ -566,16 +579,34 @@ def _consume_turn(
                     text = str(getattr(root, "text", "") or "")
                     if text:
                         completed_messages.append(text)
+                elif item_type == "reasoning" and on_reasoning_summary:
+                    item_id = str(getattr(root, "id", "") or "reasoning")
+                    for index, summary in enumerate(getattr(root, "summary", None) or ()):
+                        text = str(summary or "")
+                        if text:
+                            on_reasoning_summary(text, f"{item_id}-{index}")
                 elif item_type == "mcpToolCall":
                     tool_name = str(getattr(root, "tool", "") or "")
                     if tool_name in _PAPER_TOOL_NAMES:
                         tools_used.add(tool_name)
+                        if on_activity:
+                            item_id = str(getattr(root, "id", "") or tool_name)
+                            on_activity(_paper_tool_activity(tool_name), f"tool-{item_id}")
                 elif item_type == "imageView":
                     tools_used.add("view_image")
+                    if on_activity:
+                        item_id = str(getattr(root, "id", "") or "image-view")
+                        on_activity("已查看论文中的图像区域并核对视觉信息。", f"tool-{item_id}")
                 elif item_type == "imageGeneration":
                     tools_used.add("image_generation")
                 elif item_type == "webSearch":
                     web_search_used = True
+                    if on_activity:
+                        item_id = str(getattr(root, "id", "") or "web-search")
+                        on_activity(
+                            "已完成外部资料检索，正在与论文内部证据分开核对。",
+                            f"tool-{item_id}",
+                        )
                     action = getattr(getattr(root, "action", None), "root", None)
                     _append_external_source(
                         external_sources,
@@ -616,6 +647,22 @@ def _consume_turn(
         subagent_count=len(subagent_ids),
         external_sources=tuple(external_sources[:12]),
     )
+
+
+def _paper_tool_activity(tool_name: str) -> str:
+    messages = {
+        "paper_get_overview": "已读取论文概览并确认章节结构。",
+        "paper_search_evidence": "已搜索论文证据并筛选与当前任务相关的片段。",
+        "paper_get_section": "已读取相关章节并核对上下文。",
+        "paper_get_page": "已读取对应页内容并核对原文。",
+        "paper_get_page_image": "已查看对应论文页面的版面图像。",
+        "paper_get_figure": "已查看相关图形并核对图注与视觉内容。",
+        "paper_get_table": "已读取相关表格并核对指标与数值。",
+        "paper_get_visual_region": "已查看局部视觉区域并核对版面信息。",
+        "paper_recall_memory": "已调取与当前论文相关的已保存研读记忆。",
+        "calculate": "已完成必要的数值计算与一致性检查。",
+    }
+    return messages.get(tool_name, "已完成一项论文证据核对。")
 
 
 def _model_info(item: Any) -> CodexModelInfo:
@@ -1034,7 +1081,7 @@ def _sdk_symbols() -> dict[str, Any]:
             Sandbox,
             TextInput,
         )
-        from openai_codex.types import ReasoningEffort
+        from openai_codex.types import ReasoningEffort, ReasoningSummary
     except ImportError as exc:
         raise CodexSDKUnavailableError(
             "Codex Python SDK 未安装，请运行 pip install -r requirements.txt。"
@@ -1045,6 +1092,7 @@ def _sdk_symbols() -> dict[str, Any]:
         "CodexConfig": CodexConfig,
         "ImageInput": ImageInput,
         "ReasoningEffort": ReasoningEffort,
+        "ReasoningSummary": ReasoningSummary,
         "Sandbox": Sandbox,
         "TextInput": TextInput,
     }

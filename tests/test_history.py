@@ -145,12 +145,26 @@ class TestPaperHistory(unittest.TestCase):
             )
         ]
         complete = next(event for event in events if event["type"] == "complete")
+        evidence_event = next(event for event in events if event["type"] == "evidence_index")
+        progress_events = [event for event in events if event["type"] == "agent_progress"]
         listed = paper_history(limit=100)
         restored = history_analysis(complete["history_id"])
 
         self.assertEqual(len(listed["items"]), 1)
+        self.assertGreater(evidence_event["evidence_count"], 0)
+        self.assertFalse(any(event["type"] == "agent_token" for event in events))
+        self.assertGreater(len(progress_events), 0)
+        self.assertEqual(complete["analysis_process"]["status"], "completed")
+        self.assertGreaterEqual(complete["analysis_process"]["duration_ms"], 0)
+        self.assertNotIn("evidence_index", evidence_event)
+        self.assertNotIn("evidence_index", complete)
+        self.assertGreater(complete["evidence_count"], 0)
+        self.assertNotIn("evidence", complete["method_output"])
         self.assertEqual(restored["paper"]["title"], "Streamed Paper")
         self.assertEqual(restored["history_id"], complete["history_id"])
+        self.assertNotIn("evidence_index", restored)
+        self.assertNotIn("evidence", restored["summary_output"])
+        self.assertEqual(restored["analysis_process"], complete["analysis_process"])
         self.assertIsNone(restored["analysis_id"])
 
     def test_live_history_restore_recreates_full_evidence_chat_session(self):

@@ -510,7 +510,8 @@ class TestStructuredOutputParsing(unittest.TestCase):
                 on_token=tokens.append,
             )
 
-        self.assertIn("自动修正", "".join(tokens))
+        self.assertNotIn("自动修正", "".join(tokens))
+        self.assertEqual("".join(tokens), "not valid json")
         self.assertEqual(parsed.datasets, ["MATH-500"])
 
 

@@ -186,6 +186,7 @@ class TestCodexSDKService(unittest.TestCase):
             "ApprovalMode": SimpleNamespace(deny_all="deny-all"),
             "Sandbox": SimpleNamespace(read_only="read-only"),
             "ReasoningEffort": lambda value: f"effort:{value}",
+            "ReasoningSummary": lambda value: f"summary:{value}",
             "TextInput": lambda value: ("text", value),
             "ImageInput": lambda value: ("image", value),
         }
@@ -255,6 +256,7 @@ class TestCodexSDKService(unittest.TestCase):
         self.assertEqual(turn_args[0][0], ("text", "Analyze this paper."))
         self.assertTrue(turn_args[0][1][1].startswith("data:image/png;base64,"))
         self.assertEqual(turn_kwargs["effort"], "effort:high")
+        self.assertEqual(turn_kwargs["summary"], "summary:concise")
         self.assertEqual(turn_kwargs["output_schema"], {"type": "object"})
         self.assertEqual(turn_kwargs["sandbox"], "read-only")
         consume.assert_called_once_with(
@@ -262,6 +264,8 @@ class TestCodexSDKService(unittest.TestCase):
             model="gpt-5.6-sol",
             effort="high",
             on_token=None,
+            on_reasoning_summary=None,
+            on_activity=None,
             timeout=30.0,
         )
 
@@ -295,6 +299,54 @@ class TestCodexSDKService(unittest.TestCase):
         self.assertEqual(tokens, ["Hello ", "world"])
         self.assertEqual(result.thread_id, "thread-local")
         self.assertEqual(result.turn_id, "turn-local")
+
+    def test_turn_stream_exposes_public_reasoning_summary_deltas_only(self):
+        events = [
+            SimpleNamespace(
+                method="item/reasoning/summaryTextDelta",
+                payload=SimpleNamespace(delta="正在核对方法证据。", summary_index=0),
+            ),
+            SimpleNamespace(
+                method="item/completed",
+                payload=SimpleNamespace(
+                    item=SimpleNamespace(
+                        root=SimpleNamespace(
+                            id="reasoning-item",
+                            type="reasoning",
+                            summary=["已完成方法证据核对。"],
+                        )
+                    )
+                ),
+            ),
+            SimpleNamespace(
+                method="item/agentMessage/delta",
+                payload=SimpleNamespace(delta='{"result":"ok"}'),
+            ),
+            SimpleNamespace(
+                method="turn/completed",
+                payload=SimpleNamespace(
+                    turn=SimpleNamespace(status=SimpleNamespace(value="completed"))
+                ),
+            ),
+        ]
+        summaries: list[tuple[str, str]] = []
+
+        result = _consume_turn(
+            _FakeTurn(events),
+            model="gpt-test",
+            on_token=None,
+            on_reasoning_summary=lambda text, progress_id: summaries.append((text, progress_id)),
+            timeout=1,
+        )
+
+        self.assertEqual(
+            summaries,
+            [
+                ("正在核对方法证据。", "reasoning-0"),
+                ("已完成方法证据核对。", "reasoning-item-0"),
+            ],
+        )
+        self.assertEqual(result.text, '{"result":"ok"}')
 
     def test_turn_stream_records_only_safe_tool_search_and_subagent_metadata(self):
         events = [
@@ -354,11 +406,13 @@ class TestCodexSDKService(unittest.TestCase):
             ),
         ]
 
+        activities: list[tuple[str, str]] = []
         result = _consume_turn(
             _FakeTurn(events),
             model="gpt-5.6-sol",
             effort="ultra",
             on_token=None,
+            on_activity=lambda text, progress_id: activities.append((text, progress_id)),
             timeout=30,
         )
 
@@ -367,6 +421,8 @@ class TestCodexSDKService(unittest.TestCase):
         self.assertEqual(result.subagent_count, 1)
         self.assertEqual(result.external_sources[0]["domain"], "example.com")
         self.assertNotIn("subagent-safe", repr(result.external_sources))
+        self.assertTrue(any("数值计算" in text for text, _ in activities))
+        self.assertTrue(any("外部资料检索" in text for text, _ in activities))
 
     def test_ultra_thread_config_is_bounded_and_standard_disables_subagents(self):
         standard = _thread_config(None, effort="max")

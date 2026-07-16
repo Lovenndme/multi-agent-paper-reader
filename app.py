@@ -25,6 +25,7 @@ from agents.comparison_agent import stream_comparison_agent
 from agents.experiment_agent import run_experiment_agent, stream_experiment_agent
 from agents.method_agent import run_method_agent, stream_method_agent
 from agents.summary_agent import run_summary_agent, stream_summary_agent
+from core.analysis_progress import AnalysisProgressTracker
 from core.assessment import build_analysis_assessment
 from core.chat import (
     PaperChatRequest,
@@ -93,6 +94,11 @@ from core.history import (
 )
 from core.model_health import model_catalog_health
 from core.pdf_parser import ParsedPaper, parse_pdf
+from core.public_analysis import (
+    public_agent_output,
+    public_analysis_payload,
+    sanitize_visible_text,
+)
 from core.model_providers import (
     provider_label,
     provider_spec,
@@ -487,11 +493,19 @@ def _is_loopback_http_host(value: str) -> bool:
         return False
 
 
-def _stream_demo_tokens(agent_id: str, output: dict[str, Any]) -> Iterable[str]:
-    text = json.dumps(output, ensure_ascii=False)
-    for index in range(0, len(text), 90):
-        yield _stream_event("agent_token", agent=agent_id, text=text[index : index + 90])
-        time.sleep(0.015)
+_AGENT_START_SUMMARIES = {
+    "method": "已选取方法相关章节与证据，正在识别研究问题、方法组件和创新点。",
+    "experiment": "已选取实验章节、表格和指标证据，正在核对数据集、基线与主要结果。",
+    "critic": "已汇集论文主张和支撑证据，正在评估创新性、优点、局限与证据覆盖。",
+    "summary": "已收到三个专业 Agent 的结构化结论，正在综合冲突与不确定性并生成最终笔记。",
+}
+
+_AGENT_COMPLETE_SUMMARIES = {
+    "method": "方法分析已完成，研究问题、关键组件和创新点已整理。",
+    "experiment": "实验分析已完成，数据集、指标、基线和结果已核对。",
+    "critic": "批判性评审已完成，创新性、优点、局限和改进方向已整理。",
+    "summary": "最终研读笔记已完成，已保留上游结论中的不确定性与冲突。",
+}
 
 
 def _run_streaming_agent(
@@ -499,19 +513,47 @@ def _run_streaming_agent(
     stream_fn,
     paper_text: str,
     event_queue: Queue[str],
+    tracker: AnalysisProgressTracker,
     tool_context_path: Path | None = None,
 ):
-    def on_token(token: str) -> None:
-        event_queue.put(_stream_event("agent_token", agent=agent_id, text=token))
+    progress_buffers: dict[str, str] = {}
+
+    def on_progress(delta: str, progress_id: str) -> None:
+        combined = f"{progress_buffers.get(progress_id, '')}{delta}"
+        progress_buffers[progress_id] = combined
+        visible_summary = sanitize_visible_text(combined)
+        if not visible_summary:
+            return
+        payload = tracker.progress(
+            agent_id,
+            visible_summary,
+            source="native_reasoning_summary",
+            progress_id=progress_id,
+        )
+        event_queue.put(_stream_event("agent_progress", **payload))
+
+    def on_activity(summary: str, progress_id: str) -> None:
+        visible_summary = sanitize_visible_text(summary)
+        if not visible_summary:
+            return
+        payload = tracker.progress(
+            agent_id,
+            visible_summary,
+            source="tool_activity",
+            progress_id=progress_id,
+        )
+        event_queue.put(_stream_event("agent_progress", **payload))
 
     return stream_fn(
         paper_text,
-        on_token=on_token,
+        on_token=None,
+        on_progress=on_progress,
+        on_activity=on_activity,
         tool_context_path=tool_context_path,
     )
 
 
-def _drain_agent_tokens(event_queue: Queue[str]) -> Iterable[str]:
+def _drain_agent_events(event_queue: Queue[str]) -> Iterable[str]:
     while True:
         try:
             yield event_queue.get_nowait()
@@ -524,12 +566,37 @@ def _stream_summary_agent_events(
     method_output: MethodOutput,
     experiment_output: ExperimentOutput,
     critic_output: CriticOutput,
+    tracker: AnalysisProgressTracker,
     tool_context_path: Path | None = None,
 ) -> Iterable[tuple[str, SummaryOutput | None]]:
     event_queue: Queue[str] = Queue()
+    progress_buffers: dict[str, str] = {}
 
-    def on_token(token: str) -> None:
-        event_queue.put(_stream_event("agent_token", agent="summary", text=token))
+    def on_progress(delta: str, progress_id: str) -> None:
+        combined = f"{progress_buffers.get(progress_id, '')}{delta}"
+        progress_buffers[progress_id] = combined
+        visible_summary = sanitize_visible_text(combined)
+        if not visible_summary:
+            return
+        payload = tracker.progress(
+            "summary",
+            visible_summary,
+            source="native_reasoning_summary",
+            progress_id=progress_id,
+        )
+        event_queue.put(_stream_event("agent_progress", **payload))
+
+    def on_activity(summary: str, progress_id: str) -> None:
+        visible_summary = sanitize_visible_text(summary)
+        if not visible_summary:
+            return
+        payload = tracker.progress(
+            "summary",
+            visible_summary,
+            source="tool_activity",
+            progress_id=progress_id,
+        )
+        event_queue.put(_stream_event("agent_progress", **payload))
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
@@ -538,15 +605,17 @@ def _stream_summary_agent_events(
             method_output,
             experiment_output,
             critic_output,
-            on_token,
+            on_token=None,
+            on_progress=on_progress,
+            on_activity=on_activity,
             tool_context_path=tool_context_path,
         )
         while not future.done():
-            for event in _drain_agent_tokens(event_queue):
+            for event in _drain_agent_events(event_queue):
                 yield event, None
             time.sleep(0.05)
 
-        for event in _drain_agent_tokens(event_queue):
+        for event in _drain_agent_events(event_queue):
             yield event, None
         yield "", future.result()
 
@@ -556,16 +625,34 @@ def _stream_demo_analysis(
     filename: str,
     file_size: int,
     pdf_data: bytes,
+    tracker: AnalysisProgressTracker | None = None,
 ) -> Iterable[str]:
+    tracker = tracker or AnalysisProgressTracker()
     paper_payload = _paper_payload(paper, filename, file_size)
     snippets = build_evidence_index(paper)
     index_payload = evidence_payload(snippets)
     outputs = _demo_outputs(paper)
     yield _stream_event("paper", mode="demo", paper=paper_payload, message="PDF parsed")
     yield _stream_event(
+        "agent_progress",
+        **tracker.progress(
+            "system",
+            f"PDF 解析完成，共识别 {paper_payload['sections_count']} 个章节。",
+            progress_id="paper-parsed",
+        ),
+    )
+    yield _stream_event(
         "evidence_index",
-        evidence_index=index_payload,
+        evidence_count=len(index_payload),
         message=f"Built {len(snippets)} evidence snippets",
+    )
+    yield _stream_event(
+        "agent_progress",
+        **tracker.progress(
+            "system",
+            f"已建立 {len(index_payload)} 个文本、表格或图像证据片段。",
+            progress_id="evidence-index",
+        ),
     )
 
     for agent_id, output_key in (
@@ -573,33 +660,45 @@ def _stream_demo_analysis(
         ("experiment", "experiment_output"),
         ("critic", "critic_output"),
     ):
-        yield _stream_event("agent_started", agent=agent_id, message=f"{agent_id} started")
+        yield _stream_event(
+            "agent_started",
+            **tracker.start_agent(agent_id, _AGENT_START_SUMMARIES[agent_id]),
+        )
         time.sleep(0.12)
-        yield from _stream_demo_tokens(agent_id, outputs[output_key])
+        yield _stream_event(
+            "agent_progress",
+            **tracker.progress(
+                agent_id,
+                "Demo 模式正在根据已解析的论文内容生成可验证的界面示例。",
+                progress_id=f"{agent_id}-demo",
+            ),
+        )
         yield _stream_event(
             "agent_complete",
-            agent=agent_id,
+            **tracker.complete_agent(agent_id, _AGENT_COMPLETE_SUMMARIES[agent_id]),
             output_key=output_key,
-            output=outputs[output_key],
-            message=f"{agent_id} complete",
+            output=public_agent_output(outputs[output_key]),
         )
 
-    yield _stream_event("agent_started", agent="summary", message="summary started")
+    yield _stream_event(
+        "agent_started",
+        **tracker.start_agent("summary", _AGENT_START_SUMMARIES["summary"]),
+    )
     time.sleep(0.12)
-    yield from _stream_demo_tokens("summary", outputs["summary_output"])
     yield _stream_event(
         "agent_complete",
-        agent="summary",
+        **tracker.complete_agent("summary", _AGENT_COMPLETE_SUMMARIES["summary"]),
         output_key="summary_output",
         output=outputs["summary_output"],
-        message="summary complete",
     )
+    analysis_process = tracker.finish()
     result_payload = {
         "mode": "demo",
         "analysis_id": None,
         "model_config": _model_runtime_payload(),
         "paper": paper_payload,
         "evidence_index": index_payload,
+        "analysis_process": analysis_process,
         **outputs,
     }
     history_id: str | None = None
@@ -612,7 +711,11 @@ def _stream_demo_analysis(
         )
     except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
         yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
-    yield _stream_event("complete", history_id=history_id, **result_payload)
+    yield _stream_event(
+        "complete",
+        history_id=history_id,
+        **public_analysis_payload(result_payload),
+    )
 
 
 def _stream_live_analysis(
@@ -621,13 +724,31 @@ def _stream_live_analysis(
     file_size: int,
     pdf_data: bytes,
     pdf_path: Path | None = None,
+    tracker: AnalysisProgressTracker | None = None,
 ) -> Iterable[str]:
+    tracker = tracker or AnalysisProgressTracker()
     paper_payload = _paper_payload(paper, filename, file_size)
     yield _stream_event("paper", mode="live", paper=paper_payload, message="PDF parsed")
+    yield _stream_event(
+        "agent_progress",
+        **tracker.progress(
+            "system",
+            f"PDF 解析完成，共识别 {paper_payload['sections_count']} 个章节。",
+            progress_id="paper-parsed",
+        ),
+    )
     if pdf_path is not None:
         yield _stream_event(
             "vision_started",
             message=f"Vision enrichment started for {len(paper.figures)} visual candidates",
+        )
+        yield _stream_event(
+            "agent_progress",
+            **tracker.progress(
+                "system",
+                f"正在检查 {len(paper.figures)} 个图表候选区域并补充视觉证据。",
+                progress_id="vision",
+            ),
         )
         try:
             vision_result = enrich_paper_figures_with_vision(pdf_path, paper)
@@ -643,8 +764,24 @@ def _stream_live_analysis(
                     f"{vision_result.total_figures} figures enriched"
                 ),
             )
+            yield _stream_event(
+                "agent_progress",
+                **tracker.progress(
+                    "system",
+                    f"视觉检查完成，已补充 {vision_result.enriched} 个图表摘要。",
+                    progress_id="vision",
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - keep text/table analysis alive
             yield _stream_event("vision_error", message=f"Vision enrichment failed: {exc}")
+            yield _stream_event(
+                "agent_progress",
+                **tracker.progress(
+                    "system",
+                    "视觉摘要不可用，分析将继续使用正文、表格和图注证据。",
+                    progress_id="vision",
+                ),
+            )
     snippets = build_evidence_index(paper)
     index_payload = evidence_payload(snippets)
     tool_context = (
@@ -659,8 +796,16 @@ def _stream_live_analysis(
     tool_path = tool_context.path if tool_context else None
     yield _stream_event(
         "evidence_index",
-        evidence_index=index_payload,
+        evidence_count=len(index_payload),
         message=f"Built {len(snippets)} evidence snippets",
+    )
+    yield _stream_event(
+        "agent_progress",
+        **tracker.progress(
+            "system",
+            f"已建立 {len(index_payload)} 个文本、表格或图像证据片段。",
+            progress_id="evidence-index",
+        ),
     )
 
     agent_jobs = {
@@ -686,7 +831,10 @@ def _stream_live_analysis(
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {}
         for agent_id, (output_key, fn, paper_text) in agent_jobs.items():
-            yield _stream_event("agent_started", agent=agent_id, message=f"{agent_id} started")
+            yield _stream_event(
+                "agent_started",
+                **tracker.start_agent(agent_id, _AGENT_START_SUMMARIES[agent_id]),
+            )
             futures[
                 executor.submit(
                     _run_streaming_agent,
@@ -694,6 +842,7 @@ def _stream_live_analysis(
                     fn,
                     paper_text,
                     event_queue,
+                    tracker,
                     tool_path,
                 )
             ] = (
@@ -703,7 +852,7 @@ def _stream_live_analysis(
 
         pending = set(futures)
         while pending:
-            for event in _drain_agent_tokens(event_queue):
+            for event in _drain_agent_events(event_queue):
                 yield event
 
             completed = [future for future in pending if future.done()]
@@ -713,10 +862,15 @@ def _stream_live_analysis(
                 try:
                     agent_output = future.result()
                 except Exception as exc:  # noqa: BLE001 - stream actionable UI error
+                    failed_process = tracker.fail_agent(
+                        agent_id,
+                        f"{agent_id} 分析失败，无法生成可靠结果。",
+                    )
                     yield _stream_event(
                         "error",
-                        agent=agent_id,
                         message=f"{agent_id} failed: {exc}",
+                        **failed_process,
+                        analysis_process=tracker.finish(status="failed"),
                     )
                     if tool_context:
                         tool_context.close()
@@ -726,19 +880,21 @@ def _stream_live_analysis(
                 outputs[output_key] = output_payload
                 yield _stream_event(
                     "agent_complete",
-                    agent=agent_id,
+                    **tracker.complete_agent(agent_id, _AGENT_COMPLETE_SUMMARIES[agent_id]),
                     output_key=output_key,
-                    output=output_payload,
-                    message=f"{agent_id} complete",
+                    output=public_agent_output(output_payload),
                 )
 
             if pending:
                 time.sleep(0.05)
 
-        for event in _drain_agent_tokens(event_queue):
+        for event in _drain_agent_events(event_queue):
             yield event
 
-    yield _stream_event("agent_started", agent="summary", message="summary started")
+    yield _stream_event(
+        "agent_started",
+        **tracker.start_agent("summary", _AGENT_START_SUMMARIES["summary"]),
+    )
     try:
         method_model = MethodOutput.model_validate(outputs["method_output"])
         experiment_model = ExperimentOutput.model_validate(outputs["experiment_output"])
@@ -749,6 +905,7 @@ def _stream_live_analysis(
             method_model,
             experiment_model,
             critic_model,
+            tracker,
             tool_path,
         ):
             if event:
@@ -759,7 +916,16 @@ def _stream_live_analysis(
             raise RuntimeError("SummaryAgent finished without a parsed result.")
         summary_output = summary_model
     except Exception as exc:  # noqa: BLE001 - stream actionable UI error
-        yield _stream_event("error", agent="summary", message=f"summary failed: {exc}")
+        failed_process = tracker.fail_agent(
+            "summary",
+            "总结 Agent 失败，无法生成可靠的最终笔记。",
+        )
+        yield _stream_event(
+            "error",
+            message=f"summary failed: {exc}",
+            **failed_process,
+            analysis_process=tracker.finish(status="failed"),
+        )
         if tool_context:
             tool_context.close()
         return
@@ -788,17 +954,18 @@ def _stream_live_analysis(
     )
     yield _stream_event(
         "agent_complete",
-        agent="summary",
+        **tracker.complete_agent("summary", _AGENT_COMPLETE_SUMMARIES["summary"]),
         output_key="summary_output",
-        output=outputs["summary_output"],
-        message="summary complete",
+        output=public_agent_output(outputs["summary_output"]),
     )
+    analysis_process = tracker.finish()
     result_payload = {
         "mode": "live",
         "analysis_id": analysis_id,
         "model_config": _model_runtime_payload(),
         "paper": paper_payload,
         "evidence_index": index_payload,
+        "analysis_process": analysis_process,
         **outputs,
     }
     history_id: str | None = None
@@ -811,7 +978,11 @@ def _stream_live_analysis(
         )
     except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
         yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
-    yield _stream_event("complete", history_id=history_id, **result_payload)
+    yield _stream_event(
+        "complete",
+        history_id=history_id,
+        **public_analysis_payload(result_payload),
+    )
 
 
 def _stream_analyze_response(
@@ -820,19 +991,25 @@ def _stream_analyze_response(
     *,
     demo: bool,
 ) -> Iterable[str]:
+    tracker = AnalysisProgressTracker()
+    yield _stream_event("analysis_started", **tracker.started_payload())
     with tempfile.TemporaryDirectory(prefix="paper-reader-") as tmpdir:
         pdf_path = Path(tmpdir) / filename
         pdf_path.write_bytes(data)
         try:
             parsed = parse_pdf(pdf_path)
         except Exception as exc:  # noqa: BLE001 - stream parser details for UI
-            yield _stream_event("error", message=f"Could not parse PDF: {exc}")
+            yield _stream_event(
+                "error",
+                message=f"Could not parse PDF: {exc}",
+                analysis_process=tracker.finish(status="failed"),
+            )
             return
 
         if demo:
-            yield from _stream_demo_analysis(parsed, filename, len(data), data)
+            yield from _stream_demo_analysis(parsed, filename, len(data), data, tracker)
         else:
-            yield from _stream_live_analysis(parsed, filename, len(data), data, pdf_path)
+            yield from _stream_live_analysis(parsed, filename, len(data), data, pdf_path, tracker)
 
 
 def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[str]:
@@ -975,10 +1152,10 @@ def _stream_comparison_response(
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(stream_comparison_agent, sources, request, on_token)
                 while not future.done():
-                    for event in _drain_agent_tokens(event_queue):
+                    for event in _drain_agent_events(event_queue):
                         yield event
                     time.sleep(0.05)
-                for event in _drain_agent_tokens(event_queue):
+                for event in _drain_agent_events(event_queue):
                     yield event
                 output = future.result()
 
@@ -1456,7 +1633,7 @@ def history_analysis(history_id: str) -> dict[str, Any]:
     result["analysis_id"] = analysis_id
     result["history_id"] = history_id
     result["history_item"] = stored["history"]
-    return result
+    return public_analysis_payload(result)
 
 
 @app.delete("/api/history/{history_id}")
@@ -1561,7 +1738,7 @@ async def analyze_paper(
     except Exception as exc:  # noqa: BLE001 - return analysis with an actionable warning
         result_payload["history_id"] = None
         result_payload["history_warning"] = f"Could not save paper history: {exc}"
-    return result_payload
+    return public_analysis_payload(result_payload)
 
 
 @app.post("/api/analyze/stream")

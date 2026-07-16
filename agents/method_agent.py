@@ -22,15 +22,19 @@ def run_method_agent(paper_text: str, *, tool_context_path: str | Path | None = 
 
 def stream_method_agent(
     paper_text: str,
-    on_token: Callable[[str], None],
+    on_token: Callable[[str], None] | None = None,
     *,
+    on_progress: Callable[[str, str], None] | None = None,
+    on_activity: Callable[[str, str], None] | None = None,
     tool_context_path: str | Path | None = None,
 ) -> MethodOutput:
-    """Stream MethodAgent JSON tokens and return parsed structured output."""
+    """Return structured output while optionally streaming public progress."""
     return stream_structured_with_retry(
         MethodOutput,
         build_method_messages(paper_text),
         on_token=on_token,
+        on_progress=on_progress,
+        on_activity=on_activity,
         tool_context_path=tool_context_path,
     )
 

@@ -126,12 +126,16 @@ class CodexChatModel:
         schema: type[SchemaT],
         messages: Sequence[Any],
         on_token: Callable[[str], None] | None,
+        on_progress: Callable[[str, str], None] | None = None,
+        on_activity: Callable[[str, str], None] | None = None,
     ) -> SchemaT:
         result = _run_codex_messages(
             self,
             messages,
             output_schema=schema.model_json_schema(),
             on_token=on_token,
+            on_progress=on_progress,
+            on_activity=on_activity,
         )
         return parse_structured_output(result.text, schema)
 
@@ -437,6 +441,8 @@ def _run_codex_messages(
     output_schema: dict[str, Any] | None = None,
     image_bytes: bytes | None = None,
     on_token: Callable[[str], None] | None = None,
+    on_progress: Callable[[str, str], None] | None = None,
+    on_activity: Callable[[str, str], None] | None = None,
 ):
     from core.codex_sdk import get_codex_sdk_service
 
@@ -450,6 +456,8 @@ def _run_codex_messages(
         output_schema=output_schema,
         image_bytes=image_bytes,
         on_token=on_token,
+        on_reasoning_summary=on_progress,
+        on_activity=on_activity,
         timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
         tool_context_path=model.tool_context_path,
     )
@@ -648,6 +656,8 @@ def stream_structured_with_retry(
     messages: Sequence[BaseMessage],
     *,
     on_token: Callable[[str], None] | None = None,
+    on_progress: Callable[[str, str], None] | None = None,
+    on_activity: Callable[[str, str], None] | None = None,
     retries: int = 1,
     delay: float = 2.0,
     tool_context_path: str | Path | None = None,
@@ -665,7 +675,13 @@ def stream_structured_with_retry(
         try:
             llm = _with_codex_tool_context(get_llm(), tool_context_path)
             if isinstance(llm, CodexChatModel):
-                return llm.stream_structured(schema, messages, on_token)
+                return llm.stream_structured(
+                    schema,
+                    messages,
+                    on_token,
+                    on_progress,
+                    on_activity,
+                )
             for chunk in llm.stream(_messages_with_json_schema(messages, schema)):
                 token = _content_to_text(getattr(chunk, "content", chunk))
                 if not token:
@@ -684,8 +700,6 @@ def stream_structured_with_retry(
                 time.sleep(delay * (attempt + 1))
 
     if last_exc:
-        if on_token:
-            on_token("\n\n[系统：模型流式输出格式不完整，正在自动修正结构化结果...]\n")
         try:
             return invoke_structured_with_retry(
                 schema,

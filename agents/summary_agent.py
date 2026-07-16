@@ -33,15 +33,19 @@ def stream_summary_agent(
     method_output: MethodOutput,
     experiment_output: ExperimentOutput,
     critic_output: CriticOutput,
-    on_token: Callable[[str], None],
+    on_token: Callable[[str], None] | None = None,
     *,
+    on_progress: Callable[[str, str], None] | None = None,
+    on_activity: Callable[[str, str], None] | None = None,
     tool_context_path: str | Path | None = None,
 ) -> SummaryOutput:
-    """Stream SummaryAgent JSON tokens and return parsed structured output."""
+    """Return structured output while optionally streaming public progress."""
     return stream_structured_with_retry(
         SummaryOutput,
         build_summary_messages(paper_title, method_output, experiment_output, critic_output),
         on_token=on_token,
+        on_progress=on_progress,
+        on_activity=on_activity,
         tool_context_path=tool_context_path,
     )
 

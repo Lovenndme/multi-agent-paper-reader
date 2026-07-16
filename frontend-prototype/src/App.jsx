@@ -42,6 +42,14 @@ import avatarUrl from "./assets/avatar.png";
 import { ComparisonWorkspace, comparisonMarkdownFromData } from "./ComparisonWorkspace.jsx";
 import { ExternalSourcesPanel } from "./ExternalSourcesPanel.jsx";
 import { ModelCallTrace } from "./ModelCallTrace.jsx";
+import {
+  analysisAgentOrder,
+  applyAnalysisProcessEvent,
+  emptyAnalysisProcess,
+  formatAnalysisDuration,
+  normalizeAnalysisProcess,
+} from "./analysisProcess.js";
+import { experimentMetricColumns, parseExperimentMetricTable } from "./experimentTable.js";
 import { useChatAutoScroll } from "./useChatAutoScroll.js";
 import { useResizableChatDrawer } from "./useResizableChatDrawer.js";
 
@@ -108,13 +116,6 @@ const emptyAgentStates = {
   experiment: "waiting",
   critic: "waiting",
   summary: "waiting",
-};
-
-const emptyAgentStreams = {
-  method: "",
-  experiment: "",
-  critic: "",
-  summary: "",
 };
 
 const completeAgentStates = {
@@ -503,6 +504,34 @@ function TagList({ items }) {
   );
 }
 
+function ExperimentMetricTable({ text }) {
+  const rows = useMemo(() => parseExperimentMetricTable(text), [text]);
+  if (!rows.length) return null;
+
+  return (
+    <details className="experiment-table-prototype">
+      <summary>查看结构化指标表（试验）</summary>
+      <p>从当前实验总结中提取，便于横向阅读；精确数值仍以论文原表为准。</p>
+      <div className="experiment-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              {experimentMetricColumns.map(([key, label]) => <th key={key}>{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.setting}>
+                {experimentMetricColumns.map(([key]) => <td key={key}>{row[key]}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
 const noveltyDimensionLabels = {
   problem_originality: "问题定义",
   method_originality: "方法机制",
@@ -611,32 +640,81 @@ function StreamPlaceholder({ title, message }) {
   );
 }
 
-const streamAgentNames = {
-  method: "方法 Agent",
-  experiment: "实验 Agent",
-  critic: "评审 Agent",
-  summary: "总结 Agent",
-};
+function AnalysisProcessPanel({ process, expanded, onToggle }) {
+  const [, setClockTick] = useState(0);
+  const isRunning = process?.status === "running";
+  const startedAt = Date.parse(process?.started_at || "");
 
-function TokenStreamPreview({ streams }) {
-  const activeStreams = Object.entries(streams || {}).filter(([, text]) => text?.trim());
-  if (!activeStreams.length) return null;
+  useEffect(() => {
+    if (!isRunning || !Number.isFinite(startedAt)) return undefined;
+    const timer = window.setInterval(() => setClockTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [isRunning, startedAt]);
+
+  if (!isRunning && !process?.entries?.length) return null;
+
+  const elapsed = isRunning && Number.isFinite(startedAt)
+    ? Math.max(process.duration_ms || 0, Date.now() - startedAt)
+    : process.duration_ms || 0;
+  const groupedEntries = analysisAgentOrder
+    .map((agent) => ({
+      agent,
+      entries: (process.entries || []).filter((entry) => entry.agent === agent),
+      state: process.agents?.[agent],
+    }))
+    .filter((group) => group.entries.length || group.state);
+  const names = {
+    system: "分析准备",
+    method: "方法 Agent",
+    experiment: "实验 Agent",
+    critic: "评审 Agent",
+    summary: "总结 Agent",
+  };
 
   return (
-    <section className="token-preview">
-      <div className="token-preview-heading">
-        <span className="pulse-dot" />
-        <strong>实时生成</strong>
-        <small>正在接收模型 token，完成后会自动整理为结构化结果</small>
-      </div>
-      <div className="token-streams">
-        {activeStreams.map(([agent, text]) => (
-          <article key={agent}>
-            <span>{streamAgentNames[agent] || agent}</span>
-            <pre>{text.slice(-700)}</pre>
-          </article>
-        ))}
-      </div>
+    <section className={`analysis-process ${expanded ? "expanded" : "collapsed"}`}>
+      <button className="analysis-process-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
+        <span className={`analysis-process-status ${process.status}`}>
+          {isRunning ? <IconLoader2 size={17} /> : <IconCheck size={17} />}
+        </span>
+        <strong>{isRunning ? "正在处理" : process.status === "failed" ? "处理未完成" : "已处理"} {formatAnalysisDuration(elapsed)}</strong>
+        <span className="analysis-process-toggle-spacer" />
+        {expanded ? <IconChevronDown size={18} /> : <IconChevronRight size={18} />}
+      </button>
+      {expanded && (
+        <div className="analysis-process-body">
+          <div className="analysis-process-agents">
+            {groupedEntries.map(({ agent, entries, state }) => (
+              <article className={`analysis-process-agent ${state?.status || ""}`} key={agent}>
+                <header>
+                  <span>{names[agent] || agent}</span>
+                  <small>
+                    {state?.status === "complete" && <IconCheck size={13} />}
+                    {state?.status === "running" && <IconLoader2 size={13} />}
+                    {state?.duration_ms ? formatAnalysisDuration(state.duration_ms) : state?.status === "running" ? "进行中" : ""}
+                  </small>
+                </header>
+                <div className="analysis-process-entries">
+                  {entries.map((entry) => (
+                    <div key={`${agent}-${entry.id}`}>
+                      <i />
+                      <p>{entry.text}</p>
+                      <small>
+                        {entry.source === "native_reasoning_summary"
+                          ? "模型过程摘要"
+                          : entry.source === "tool_activity"
+                            ? "工具活动"
+                            : "处理进度"}
+                        {entry.elapsed_ms ? ` · ${formatAnalysisDuration(entry.elapsed_ms)}` : ""}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -661,9 +739,7 @@ function EvidenceList({ items }) {
   );
 }
 
-function ResultContent({ activeTab, data, error, streamMessage, agentStreams, isAnalyzing }) {
-  const showLivePreview = isAnalyzing && !error;
-
+function ResultContent({ activeTab, data, error, streamMessage }) {
   if (error) {
     return (
       <>
@@ -695,7 +771,6 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
     }
     return (
       <>
-        {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
         <Section title="研究问题"><p>{method.research_problem}</p></Section>
         <Section title="提出的方法"><p>{method.proposed_method}</p></Section>
         <Section title="关键组件"><TagList items={method.key_components} /></Section>
@@ -712,10 +787,12 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
     }
     return (
       <>
-        {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
         <Section title="数据集"><TagList items={experiment.datasets} /></Section>
         <Section title="评估指标"><TagList items={experiment.metrics} /></Section>
-        <Section title="主要结果"><p>{experiment.main_results}</p></Section>
+        <Section title="主要结果">
+          <p>{experiment.main_results}</p>
+          <ExperimentMetricTable text={experiment.main_results} />
+        </Section>
         <Section title="基线对比"><p>{experiment.comparison_with_baselines}</p></Section>
         {experiment.ablation_study && <Section title="消融实验"><p>{experiment.ablation_study}</p></Section>}
         <Section title="重要发现"><BulletList items={experiment.notable_findings} /></Section>
@@ -729,7 +806,6 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
     }
     return (
       <>
-        {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
         <Section title="创新性评分依据"><p>{critic.novelty_justification}</p></Section>
         <Section title="优点"><BulletList items={critic.strengths} /></Section>
         <Section title="局限"><BulletList items={critic.limitations} /></Section>
@@ -745,7 +821,6 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
     }
     return (
       <>
-        {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
         <Section title="精炼研读笔记"><p>{summary.reading_notes || summary.one_sentence_summary}</p></Section>
         <Section title="方法要点"><p>{summary.method_highlights}</p></Section>
         <Section title="实验要点"><p>{summary.experiment_highlights}</p></Section>
@@ -757,7 +832,6 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
   if (!summary || !critic) {
     return (
       <>
-        {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
         <StreamPlaceholder title="正在接收流式分析" message={streamMessage} />
         {method && <Section title="方法结果预览"><p>{method.proposed_method}</p></Section>}
         {experiment && <Section title="实验结果预览"><p>{experiment.main_results}</p></Section>}
@@ -768,7 +842,6 @@ function ResultContent({ activeTab, data, error, streamMessage, agentStreams, is
 
   return (
     <>
-      {showLivePreview && <TokenStreamPreview streams={agentStreams} />}
       <Section title="一句话总结"><p>{summary.one_sentence_summary}</p></Section>
       <Section title="核心贡献"><NumberedList items={summary.core_contributions} /></Section>
       <ScoreGrid critic={critic} assessment={data.assessment} />
@@ -801,7 +874,6 @@ const chatContextKeys = [
   "critic_output",
   "summary_output",
   "assessment",
-  "evidence_index",
 ];
 
 function analysisContextForChat(data) {
@@ -1711,7 +1783,8 @@ export function App() {
   const [analysisData, setAnalysisData] = useState(sampleAnalysis);
   const [analysisError, setAnalysisError] = useState("");
   const [agentStates, setAgentStates] = useState(emptyAgentStates);
-  const [agentStreams, setAgentStreams] = useState(emptyAgentStreams);
+  const [analysisProcess, setAnalysisProcess] = useState(emptyAnalysisProcess);
+  const [analysisProcessExpanded, setAnalysisProcessExpanded] = useState(false);
   const [streamMessage, setStreamMessage] = useState("已准备好开始分析");
   const [selectionAction, setSelectionAction] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -2419,7 +2492,8 @@ export function App() {
       setAnalysisError("");
       setIsAnalyzing(false);
       setAgentStates(completeAgentStates);
-      setAgentStreams(emptyAgentStreams);
+      setAnalysisProcess(normalizeAnalysisProcess(payload.analysis_process));
+      setAnalysisProcessExpanded(false);
       setStreamMessage("已从本地历史恢复完整论文分析。" );
       setSelectionAction(null);
       setChatOpen(false);
@@ -2453,7 +2527,8 @@ export function App() {
         setAnalysisData(sampleAnalysis);
         setSelectedFile(null);
         setAgentStates(emptyAgentStates);
-        setAgentStreams(emptyAgentStreams);
+        setAnalysisProcess(emptyAnalysisProcess());
+        setAnalysisProcessExpanded(false);
         setStreamMessage("已准备好开始分析");
         setChatOpen(false);
         resetChatConversations();
@@ -2482,7 +2557,8 @@ export function App() {
     setSelectedChapterIndex(0);
     setAnalysisError("");
     setAgentStates(emptyAgentStates);
-    setAgentStreams(emptyAgentStreams);
+    setAnalysisProcess(emptyAnalysisProcess());
+    setAnalysisProcessExpanded(false);
     setStreamMessage("正在解析 PDF 标题、页码和章节结构…");
     setAnalysisData(pendingAnalysisForFile(file));
     chatAbortRef.current?.abort();
@@ -2715,6 +2791,16 @@ export function App() {
       summary: "总结 Agent",
     };
 
+    if (["analysis_started", "agent_started", "agent_progress", "agent_complete", "complete", "error"].includes(event.type)) {
+      setAnalysisProcess((previous) => applyAnalysisProcessEvent(previous, event));
+    }
+
+    if (event.type === "analysis_started") {
+      setAnalysisProcessExpanded(true);
+      setStreamMessage("论文已上传，正在解析内容并准备证据索引。");
+      return "";
+    }
+
     if (event.type === "paper") {
       setSelectedChapterIndex(0);
       setAnalysisData((previous) => ({
@@ -2744,24 +2830,25 @@ export function App() {
     if (event.type === "evidence_index") {
       setAnalysisData((previous) => ({
         ...(previous || {}),
-        evidence_index: event.evidence_index || [],
+        evidence_count: event.evidence_count || 0,
       }));
-      setStreamMessage(`已建立 ${(event.evidence_index || []).length} 个文本/表格/图像证据片段，正在进行证据化研读。`);
+      setStreamMessage(`已建立 ${event.evidence_count || 0} 个文本/表格/图像证据片段，正在进行证据化研读。`);
       return "";
     }
 
     if (event.type === "agent_started") {
       setAgentStates((previous) => ({ ...previous, [event.agent]: "running" }));
-      setAgentStreams((previous) => ({ ...previous, [event.agent]: "" }));
-      setStreamMessage(`${agentNames[event.agent] || event.agent} 正在阅读相关章节。`);
+      setStreamMessage(event.summary || `${agentNames[event.agent] || event.agent} 正在阅读相关章节。`);
+      return "";
+    }
+
+    if (event.type === "agent_progress") {
+      if (event.text) setStreamMessage(event.text);
       return "";
     }
 
     if (event.type === "agent_token") {
-      setAgentStreams((previous) => {
-        const current = `${previous[event.agent] || ""}${event.text || ""}`;
-        return { ...previous, [event.agent]: current.slice(-2600) };
-      });
+      // Backward compatibility: raw structured tokens are intentionally hidden.
       return "";
     }
 
@@ -2779,7 +2866,7 @@ export function App() {
       const { type, ...payload } = event;
       setAnalysisData(payload);
       setAgentStates(completeAgentStates);
-      setAgentStreams(emptyAgentStreams);
+      setAnalysisProcessExpanded(false);
       setStreamMessage("所有 Agent 已完成，最终研读笔记已生成。" );
       if (payload.history_id) void loadPaperHistory();
       return "";
@@ -2791,6 +2878,7 @@ export function App() {
     }
 
     if (event.type === "error") {
+      setAnalysisProcessExpanded(true);
       setAgentStates((previous) => ({
         ...previous,
         ...(event.agent ? { [event.agent]: "failed" } : {}),
@@ -2817,7 +2905,8 @@ export function App() {
     setHistoryOpen(false);
     setAnalysisError("");
     setAgentStates(emptyAgentStates);
-    setAgentStreams(emptyAgentStreams);
+    setAnalysisProcess(emptyAnalysisProcess());
+    setAnalysisProcessExpanded(true);
     setStreamMessage("正在将 PDF 上传到后端..." );
     setAnalysisData((previous) => ({
       mode: "pending",
@@ -3172,13 +3261,16 @@ export function App() {
             onKeyUp={handleResultSelection}
             onScroll={() => setSelectionAction(null)}
           >
+            <AnalysisProcessPanel
+              process={analysisProcess}
+              expanded={analysisProcessExpanded}
+              onToggle={() => setAnalysisProcessExpanded((value) => !value)}
+            />
             <ResultContent
               activeTab={activeTab}
               data={displayedData}
               error={analysisError}
               streamMessage={streamMessage}
-              agentStreams={agentStreams}
-              isAnalyzing={isAnalyzing}
             />
           </div>
           {selectionAction && !chatOpen && (
