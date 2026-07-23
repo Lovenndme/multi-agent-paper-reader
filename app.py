@@ -20,11 +20,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
-from agents.critic_agent import run_critic_agent, stream_critic_agent
+from agents.critic_agent import CRITIC_AGENT_SPEC
 from agents.comparison_agent import stream_comparison_agent
-from agents.experiment_agent import run_experiment_agent, stream_experiment_agent
-from agents.method_agent import run_method_agent, stream_method_agent
-from agents.summary_agent import run_summary_agent, stream_summary_agent
+from agents.experiment_agent import EXPERIMENT_AGENT_SPEC
+from agents.method_agent import METHOD_AGENT_SPEC
+from agents.summary_agent import SUMMARY_AGENT_SPEC, SummaryAgentInput
+from core.agent_harness import AgentHarnessError, AgentRunContext, get_agent_harness
 from core.analysis_progress import AnalysisProgressTracker
 from core.assessment import build_analysis_assessment
 from core.chat import (
@@ -84,7 +85,7 @@ from core.comparison_history import (
 )
 from core.codex_sdk import CodexSDKError, close_codex_sdk_service, get_codex_sdk_service
 from core.codex_tools import build_codex_paper_manifest, create_codex_tool_context
-from core.evidence import build_evidence_index, evidence_context_for_agent, evidence_payload
+from core.evidence import build_evidence_index, evidence_payload
 from core.history import (
     delete_paper_history,
     list_paper_history,
@@ -97,7 +98,6 @@ from core.pdf_parser import ParsedPaper, parse_pdf
 from core.public_analysis import (
     public_agent_output,
     public_analysis_payload,
-    sanitize_visible_text,
 )
 from core.model_providers import (
     provider_label,
@@ -380,26 +380,26 @@ def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str,
         else None
     )
     tool_path = tool_context.path if tool_context else None
+    harness = get_agent_harness()
+    agent_context = AgentRunContext(
+        paper=paper,
+        snippets=snippets,
+        tool_context_path=tool_path,
+    )
     try:
-        method = run_method_agent(
-            evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method"),
-            tool_context_path=tool_path,
-        )
-        experiment = run_experiment_agent(
-            evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment"),
-            tool_context_path=tool_path,
-        )
-        critic = run_critic_agent(
-            evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic"),
-            tool_context_path=tool_path,
-        )
-        summary = run_summary_agent(
-            paper_title=paper.title,
-            method_output=method,
-            experiment_output=experiment,
-            critic_output=critic,
-            tool_context_path=tool_path,
-        )
+        method = harness.run(METHOD_AGENT_SPEC, agent_context).output
+        experiment = harness.run(EXPERIMENT_AGENT_SPEC, agent_context).output
+        critic = harness.run(CRITIC_AGENT_SPEC, agent_context).output
+        summary = harness.run(
+            SUMMARY_AGENT_SPEC,
+            AgentRunContext(tool_context_path=tool_path),
+            input_data=SummaryAgentInput(
+                paper_title=paper.title,
+                method_output=method,
+                experiment_output=experiment,
+                critic_output=critic,
+            ),
+        ).output
     finally:
         if tool_context:
             tool_context.close()
@@ -493,66 +493,6 @@ def _is_loopback_http_host(value: str) -> bool:
         return False
 
 
-_AGENT_START_SUMMARIES = {
-    "method": "已选取方法相关章节与证据，正在识别研究问题、方法组件和创新点。",
-    "experiment": "已选取实验章节、表格和指标证据，正在核对数据集、基线与主要结果。",
-    "critic": "已汇集论文主张和支撑证据，正在评估创新性、优点、局限与证据覆盖。",
-    "summary": "已收到三个专业 Agent 的结构化结论，正在综合冲突与不确定性并生成最终笔记。",
-}
-
-_AGENT_COMPLETE_SUMMARIES = {
-    "method": "方法分析已完成，研究问题、关键组件和创新点已整理。",
-    "experiment": "实验分析已完成，数据集、指标、基线和结果已核对。",
-    "critic": "批判性评审已完成，创新性、优点、局限和改进方向已整理。",
-    "summary": "最终研读笔记已完成，已保留上游结论中的不确定性与冲突。",
-}
-
-
-def _run_streaming_agent(
-    agent_id: str,
-    stream_fn,
-    paper_text: str,
-    event_queue: Queue[str],
-    tracker: AnalysisProgressTracker,
-    tool_context_path: Path | None = None,
-):
-    progress_buffers: dict[str, str] = {}
-
-    def on_progress(delta: str, progress_id: str) -> None:
-        combined = f"{progress_buffers.get(progress_id, '')}{delta}"
-        progress_buffers[progress_id] = combined
-        visible_summary = sanitize_visible_text(combined)
-        if not visible_summary:
-            return
-        payload = tracker.progress(
-            agent_id,
-            visible_summary,
-            source="native_reasoning_summary",
-            progress_id=progress_id,
-        )
-        event_queue.put(_stream_event("agent_progress", **payload))
-
-    def on_activity(summary: str, progress_id: str) -> None:
-        visible_summary = sanitize_visible_text(summary)
-        if not visible_summary:
-            return
-        payload = tracker.progress(
-            agent_id,
-            visible_summary,
-            source="tool_activity",
-            progress_id=progress_id,
-        )
-        event_queue.put(_stream_event("agent_progress", **payload))
-
-    return stream_fn(
-        paper_text,
-        on_token=None,
-        on_progress=on_progress,
-        on_activity=on_activity,
-        tool_context_path=tool_context_path,
-    )
-
-
 def _drain_agent_events(event_queue: Queue[str]) -> Iterable[str]:
     while True:
         try:
@@ -570,45 +510,26 @@ def _stream_summary_agent_events(
     tool_context_path: Path | None = None,
 ) -> Iterable[tuple[str, SummaryOutput | None]]:
     event_queue: Queue[str] = Queue()
-    progress_buffers: dict[str, str] = {}
 
-    def on_progress(delta: str, progress_id: str) -> None:
-        combined = f"{progress_buffers.get(progress_id, '')}{delta}"
-        progress_buffers[progress_id] = combined
-        visible_summary = sanitize_visible_text(combined)
-        if not visible_summary:
-            return
-        payload = tracker.progress(
-            "summary",
-            visible_summary,
-            source="native_reasoning_summary",
-            progress_id=progress_id,
-        )
-        event_queue.put(_stream_event("agent_progress", **payload))
-
-    def on_activity(summary: str, progress_id: str) -> None:
-        visible_summary = sanitize_visible_text(summary)
-        if not visible_summary:
-            return
-        payload = tracker.progress(
-            "summary",
-            visible_summary,
-            source="tool_activity",
-            progress_id=progress_id,
-        )
-        event_queue.put(_stream_event("agent_progress", **payload))
+    def emit(event_type: str, payload: dict[str, Any]) -> None:
+        event_queue.put(_stream_event(event_type, **payload))
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
-            stream_summary_agent,
-            paper_title,
-            method_output,
-            experiment_output,
-            critic_output,
-            on_token=None,
-            on_progress=on_progress,
-            on_activity=on_activity,
-            tool_context_path=tool_context_path,
+            get_agent_harness().run,
+            SUMMARY_AGENT_SPEC,
+            AgentRunContext(
+                tool_context_path=tool_context_path,
+                tracker=tracker,
+                emit=emit,
+                stream=True,
+            ),
+            input_data=SummaryAgentInput(
+                paper_title=paper_title,
+                method_output=method_output,
+                experiment_output=experiment_output,
+                critic_output=critic_output,
+            ),
         )
         while not future.done():
             for event in _drain_agent_events(event_queue):
@@ -617,7 +538,7 @@ def _stream_summary_agent_events(
 
         for event in _drain_agent_events(event_queue):
             yield event, None
-        yield "", future.result()
+        yield "", future.result().output
 
 
 def _stream_demo_analysis(
@@ -655,14 +576,12 @@ def _stream_demo_analysis(
         ),
     )
 
-    for agent_id, output_key in (
-        ("method", "method_output"),
-        ("experiment", "experiment_output"),
-        ("critic", "critic_output"),
-    ):
+    for spec in (METHOD_AGENT_SPEC, EXPERIMENT_AGENT_SPEC, CRITIC_AGENT_SPEC):
+        agent_id = spec.agent_id
+        output_key = spec.output_key
         yield _stream_event(
             "agent_started",
-            **tracker.start_agent(agent_id, _AGENT_START_SUMMARIES[agent_id]),
+            **tracker.start_agent(agent_id, spec.start_summary),
         )
         time.sleep(0.12)
         yield _stream_event(
@@ -675,19 +594,19 @@ def _stream_demo_analysis(
         )
         yield _stream_event(
             "agent_complete",
-            **tracker.complete_agent(agent_id, _AGENT_COMPLETE_SUMMARIES[agent_id]),
+            **tracker.complete_agent(agent_id, spec.complete_summary),
             output_key=output_key,
             output=public_agent_output(outputs[output_key]),
         )
 
     yield _stream_event(
         "agent_started",
-        **tracker.start_agent("summary", _AGENT_START_SUMMARIES["summary"]),
+        **tracker.start_agent("summary", SUMMARY_AGENT_SPEC.start_summary),
     )
     time.sleep(0.12)
     yield _stream_event(
         "agent_complete",
-        **tracker.complete_agent("summary", _AGENT_COMPLETE_SUMMARIES["summary"]),
+        **tracker.complete_agent("summary", SUMMARY_AGENT_SPEC.complete_summary),
         output_key="summary_output",
         output=outputs["summary_output"],
     )
@@ -808,46 +727,37 @@ def _stream_live_analysis(
         ),
     )
 
-    agent_jobs = {
-        "method": (
-            "method_output",
-            stream_method_agent,
-            evidence_context_for_agent(snippets, "method") or paper.get_sections_for_agent("method"),
-        ),
-        "experiment": (
-            "experiment_output",
-            stream_experiment_agent,
-            evidence_context_for_agent(snippets, "experiment") or paper.get_sections_for_agent("experiment"),
-        ),
-        "critic": (
-            "critic_output",
-            stream_critic_agent,
-            evidence_context_for_agent(snippets, "critic") or paper.get_sections_for_agent("critic"),
-        ),
-    }
-
     outputs: dict[str, Any] = {}
     event_queue: Queue[str] = Queue()
+
+    def emit_agent_event(event_type: str, payload: dict[str, Any]) -> None:
+        event_queue.put(_stream_event(event_type, **payload))
+
+    agent_specs = (
+        METHOD_AGENT_SPEC,
+        EXPERIMENT_AGENT_SPEC,
+        CRITIC_AGENT_SPEC,
+    )
+    harness = get_agent_harness()
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {}
-        for agent_id, (output_key, fn, paper_text) in agent_jobs.items():
-            yield _stream_event(
-                "agent_started",
-                **tracker.start_agent(agent_id, _AGENT_START_SUMMARIES[agent_id]),
-            )
+        for spec in agent_specs:
             futures[
                 executor.submit(
-                    _run_streaming_agent,
-                    agent_id,
-                    fn,
-                    paper_text,
-                    event_queue,
-                    tracker,
-                    tool_path,
+                    harness.run,
+                    spec,
+                    AgentRunContext(
+                        paper=paper,
+                        snippets=snippets,
+                        tool_context_path=tool_path,
+                        tracker=tracker,
+                        emit=emit_agent_event,
+                        stream=True,
+                    ),
                 )
             ] = (
-                agent_id,
-                output_key,
+                spec.agent_id,
+                spec.output_key,
             )
 
         pending = set(futures)
@@ -860,8 +770,18 @@ def _stream_live_analysis(
                 pending.remove(future)
                 agent_id, output_key = futures[future]
                 try:
-                    agent_output = future.result()
-                except Exception as exc:  # noqa: BLE001 - stream actionable UI error
+                    agent_result = future.result()
+                except AgentHarnessError as exc:
+                    yield _stream_event(
+                        "error",
+                        message=f"{agent_id} failed ({exc.category}): {exc.cause}",
+                        **exc.failure_payload,
+                        analysis_process=tracker.finish(status="failed"),
+                    )
+                    if tool_context:
+                        tool_context.close()
+                    return
+                except Exception as exc:  # noqa: BLE001 - guard executor failures
                     failed_process = tracker.fail_agent(
                         agent_id,
                         f"{agent_id} 分析失败，无法生成可靠结果。",
@@ -876,14 +796,8 @@ def _stream_live_analysis(
                         tool_context.close()
                     return
 
-                output_payload = agent_output.model_dump()
+                output_payload = agent_result.output.model_dump()
                 outputs[output_key] = output_payload
-                yield _stream_event(
-                    "agent_complete",
-                    **tracker.complete_agent(agent_id, _AGENT_COMPLETE_SUMMARIES[agent_id]),
-                    output_key=output_key,
-                    output=public_agent_output(output_payload),
-                )
 
             if pending:
                 time.sleep(0.05)
@@ -891,10 +805,6 @@ def _stream_live_analysis(
         for event in _drain_agent_events(event_queue):
             yield event
 
-    yield _stream_event(
-        "agent_started",
-        **tracker.start_agent("summary", _AGENT_START_SUMMARIES["summary"]),
-    )
     try:
         method_model = MethodOutput.model_validate(outputs["method_output"])
         experiment_model = ExperimentOutput.model_validate(outputs["experiment_output"])
@@ -915,7 +825,17 @@ def _stream_live_analysis(
         if summary_model is None:
             raise RuntimeError("SummaryAgent finished without a parsed result.")
         summary_output = summary_model
-    except Exception as exc:  # noqa: BLE001 - stream actionable UI error
+    except AgentHarnessError as exc:
+        yield _stream_event(
+            "error",
+            message=f"summary failed ({exc.category}): {exc.cause}",
+            **exc.failure_payload,
+            analysis_process=tracker.finish(status="failed"),
+        )
+        if tool_context:
+            tool_context.close()
+        return
+    except Exception as exc:  # noqa: BLE001 - guard summary executor failures
         failed_process = tracker.fail_agent(
             "summary",
             "总结 Agent 失败，无法生成可靠的最终笔记。",
@@ -951,12 +871,6 @@ def _stream_live_analysis(
             "evidence_index": index_payload,
             **outputs,
         },
-    )
-    yield _stream_event(
-        "agent_complete",
-        **tracker.complete_agent("summary", _AGENT_COMPLETE_SUMMARIES["summary"]),
-        output_key="summary_output",
-        output=public_agent_output(outputs["summary_output"]),
     )
     analysis_process = tracker.finish()
     result_payload = {

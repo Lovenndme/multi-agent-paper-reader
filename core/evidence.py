@@ -171,8 +171,13 @@ def evidence_context_for_agent(
     if not selected:
         return ""
 
+    return format_evidence_context(selected)
+
+
+def format_evidence_context(snippets: Iterable[EvidenceSnippet]) -> str:
+    """Format already-selected snippets with stable evidence provenance."""
     blocks = []
-    for snippet in selected:
+    for snippet in snippets:
         blocks.append(
             "\n".join(
                 [

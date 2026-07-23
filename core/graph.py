@@ -4,12 +4,13 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agents.critic_agent import run_critic_agent
-from agents.experiment_agent import run_experiment_agent
-from agents.method_agent import run_method_agent
-from agents.summary_agent import run_summary_agent
+from agents.critic_agent import CRITIC_AGENT_SPEC
+from agents.experiment_agent import EXPERIMENT_AGENT_SPEC
+from agents.method_agent import METHOD_AGENT_SPEC
+from agents.summary_agent import SUMMARY_AGENT_SPEC, SummaryAgentInput
+from core.agent_harness import AgentRunContext, get_agent_harness
 from core.assessment import build_analysis_assessment
-from core.evidence import EvidenceSnippet, build_evidence_index, evidence_context_for_agent
+from core.evidence import EvidenceSnippet, build_evidence_index
 from core.pdf_parser import ParsedPaper
 from core.schemas import AnalysisAssessment, CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
 
@@ -40,31 +41,43 @@ def evidence_node(state: PaperState) -> dict:
 
 def method_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = evidence_context_for_agent(state["evidence_index"], "method") or paper.get_sections_for_agent("method")
-    return {"method_output": run_method_agent(text)}
+    result = get_agent_harness().run(
+        METHOD_AGENT_SPEC,
+        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+    )
+    return {"method_output": result.output}
 
 
 def experiment_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = evidence_context_for_agent(state["evidence_index"], "experiment") or paper.get_sections_for_agent("experiment")
-    return {"experiment_output": run_experiment_agent(text)}
+    result = get_agent_harness().run(
+        EXPERIMENT_AGENT_SPEC,
+        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+    )
+    return {"experiment_output": result.output}
 
 
 def critic_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    text = evidence_context_for_agent(state["evidence_index"], "critic") or paper.get_sections_for_agent("critic")
-    return {"critic_output": run_critic_agent(text)}
+    result = get_agent_harness().run(
+        CRITIC_AGENT_SPEC,
+        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+    )
+    return {"critic_output": result.output}
 
 
 def summary_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
-    result = run_summary_agent(
-        paper_title=paper.title,
-        method_output=state["method_output"],
-        experiment_output=state["experiment_output"],
-        critic_output=state["critic_output"],
+    result = get_agent_harness().run(
+        SUMMARY_AGENT_SPEC,
+        input_data=SummaryAgentInput(
+            paper_title=paper.title,
+            method_output=state["method_output"],
+            experiment_output=state["experiment_output"],
+            critic_output=state["critic_output"],
+        ),
     )
-    return {"summary_output": result}
+    return {"summary_output": result.output}
 
 
 def assessment_node(state: PaperState) -> dict:

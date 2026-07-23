@@ -17,9 +17,17 @@
 
 ```text
 PDF -> 解析与版面/视觉提取 -> 证据索引
+    -> Web / LangGraph 编排
+    -> Agent Harness（检索、生命周期、进度、校验）
+    -> Agent Runtime（模型调用、流式适配、重试）
     -> Method / Experiment / Critic Agent
     -> Summary Agent -> 结构化分析与论文追问
 ```
+
+Agent 的声明式契约位于各自 `agents/*_agent.py` 的 `AgentSpec` 中。Web、
+LangGraph 和兼容入口必须通过 `core/agent_harness.py` 调用，
+不得绕过 Harness 直接调用 `utils/llm.py`。Runtime 与厂商适配边界详见
+`docs/agent-harness.md`。
 
 修改结构化输出时，必须同步检查 `core/schemas.py`、相关 Agent、提示词、
 汇总逻辑、API 响应、前端渲染和测试，不能只修改其中一层。
