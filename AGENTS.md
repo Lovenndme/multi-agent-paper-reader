@@ -16,18 +16,24 @@
 主要处理链路：
 
 ```text
-PDF -> 解析与版面/视觉提取 -> 证据索引
-    -> Web / LangGraph 编排
+PDF / HTTP -> PaperAnalysisOrchestrator
+    -> 解析与版面/视觉提取 -> 证据索引
+    -> LangGraph（专业 Agent 并行与 Summary 汇合）
     -> Agent Harness（检索、生命周期、进度、校验）
     -> Agent Runtime（模型调用、流式适配、重试）
     -> Method / Experiment / Critic Agent
     -> Summary Agent -> 结构化分析与论文追问
 ```
 
+`core/analysis_orchestrator.py` 是整篇论文任务的唯一应用编排入口，负责解析、
+视觉降级、证据、LangGraph 工作流、评估、持久化和最终任务状态。
+`app.py` 的分析接口只负责 HTTP 校验、调用 Orchestrator 和 NDJSON 序列化；
+不得在接口层重新实现 Agent 并行、汇总或持久化流程。
+
 Agent 的声明式契约位于各自 `agents/*_agent.py` 的 `AgentSpec` 中。Web、
 LangGraph 和兼容入口必须通过 `core/agent_harness.py` 调用，
 不得绕过 Harness 直接调用 `utils/llm.py`。Runtime 与厂商适配边界详见
-`docs/agent-harness.md`。
+`docs/agent-harness.md`，完整任务边界详见 `docs/analysis-orchestrator.md`。
 
 修改结构化输出时，必须同步检查 `core/schemas.py`、相关 Agent、提示词、
 汇总逻辑、API 响应、前端渲染和测试，不能只修改其中一层。

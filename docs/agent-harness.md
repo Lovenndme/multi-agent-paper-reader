@@ -5,7 +5,10 @@
 第一版执行架构把 Agent 的“任务定义”和模型的“实际调用”分开：
 
 ```text
-FastAPI / LangGraph
+PaperAnalysisOrchestrator
+        |
+        v
+     LangGraph
         |
         v
    AgentSpec
@@ -78,9 +81,10 @@ Runtime 不负责论文检索、Prompt 业务内容、Web 事件或持久化。
 
 ## 调用路径
 
-- FastAPI 实时单论文分析：三个专业 Agent 并行通过 Harness 运行，Summary 在
-  fan-in 后通过同一 Harness 运行。
-- LangGraph：节点只负责图编排，实际 Agent 执行统一委托给 Harness。
+- FastAPI 单论文接口只调用 `PaperAnalysisOrchestrator` 并序列化事件。
+- Orchestrator 负责解析、视觉检查、证据、持久化和完整任务状态。
+- LangGraph 负责三个专业 Agent 的并行依赖、Summary fan-in 与 Assessment；
+  实际 Agent 执行统一委托给 Harness。
 - 原有 `run_*_agent` / `stream_*_agent` 函数保留为兼容入口，但其内部同样调用
   Harness，不再直接调用模型。
 - 多论文 Comparison 的 token 流继续保持现有前端协议，执行本身已接入 Harness。

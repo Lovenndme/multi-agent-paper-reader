@@ -20,14 +20,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
-from agents.critic_agent import CRITIC_AGENT_SPEC
 from agents.comparison_agent import stream_comparison_agent
-from agents.experiment_agent import EXPERIMENT_AGENT_SPEC
-from agents.method_agent import METHOD_AGENT_SPEC
-from agents.summary_agent import SUMMARY_AGENT_SPEC, SummaryAgentInput
-from core.agent_harness import AgentHarnessError, AgentRunContext, get_agent_harness
-from core.analysis_progress import AnalysisProgressTracker
-from core.assessment import build_analysis_assessment
+from core.analysis_events import AnalysisEvent, AnalysisOrchestratorError, AnalysisRequest
+from core.analysis_orchestrator import (
+    build_paper_payload,
+    get_paper_analysis_orchestrator,
+    missing_model_key_message,
+)
 from core.chat import (
     PaperChatRequest,
     build_chat_prompt,
@@ -84,34 +83,22 @@ from core.comparison_history import (
     schedule_comparison_conversation_title,
 )
 from core.codex_sdk import CodexSDKError, close_codex_sdk_service, get_codex_sdk_service
-from core.codex_tools import build_codex_paper_manifest, create_codex_tool_context
-from core.evidence import build_evidence_index, evidence_payload
 from core.history import (
     delete_paper_history,
     list_paper_history,
     load_paper_analysis,
     paper_history_exists,
-    save_paper_analysis,
 )
 from core.model_health import model_catalog_health
-from core.pdf_parser import ParsedPaper, parse_pdf
-from core.public_analysis import (
-    public_agent_output,
-    public_analysis_payload,
-)
+from core.pdf_parser import parse_pdf
+from core.public_analysis import public_analysis_payload
 from core.model_providers import (
-    provider_label,
-    provider_spec,
     selected_text_model,
     selected_text_model_label,
-    selected_text_mode,
     selected_vision_model,
     text_provider_id,
-    vision_enabled,
     vision_provider_id,
 )
-from core.schemas import CriticOutput, ExperimentOutput, MethodOutput, SummaryOutput
-from core.section_titles import clean_section_title
 from core.settings import (
     PROJECT_VERSION,
     ApiKeySettingsRequest,
@@ -124,7 +111,6 @@ from core.settings import (
     configure_model_routing,
     configure_provider_api_key,
 )
-from core.vision import enrich_paper_figures_with_vision
 from utils.llm import is_llm_configured, is_vision_configured
 
 
@@ -140,6 +126,7 @@ load_dotenv(
     Path(os.environ.get("PAPER_READER_ENV_PATH", ROOT / ".env")),
     override=False,
 )
+ANALYSIS_ORCHESTRATOR = get_paper_analysis_orchestrator()
 
 
 @asynccontextmanager
@@ -220,238 +207,21 @@ def _frontend_build_error(status: dict[str, Any]) -> str:
     )
 
 
-def _section_payload(
-    paper: ParsedPaper,
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "title": section.title,
-            "display_title": clean_section_title(section.title, index),
-            "page_start": section.page_start,
-            "page_end": section.page_end,
-            "chars": len(section.content),
-        }
-        for index, section in enumerate(paper.sections)
-    ]
-
-
-def _paper_payload(
-    paper: ParsedPaper,
-    filename: str,
-    file_size: int,
-) -> dict[str, Any]:
-    page_count = max((section.page_end for section in paper.sections), default=-1) + 1
-    return {
-        "title": paper.title,
-        "filename": filename,
-        "size_bytes": file_size,
-        "pages": page_count,
-        "sections_count": len(paper.sections),
-        "sections": _section_payload(paper),
-        "metadata": paper.metadata,
-    }
-
-
-def _demo_evidence(paper: ParsedPaper) -> list[dict[str, str]]:
-    first_section = paper.sections[0].title if paper.sections else "Full Paper"
-    return [
-        {
-            "id": "E001",
-            "section": first_section,
-            "page": "p.1",
-            "quote": "Demo 模式未调用模型，仅用于验证上传、解析和渲染链路。",
-            "note": "该证据说明当前输出是确定性的演示结果，不是论文内容判断。",
-        }
-    ]
-
-
-def _demo_outputs(paper: ParsedPaper) -> dict[str, Any]:
-    title = paper.title or "Uploaded Paper"
-    demo_evidence = _demo_evidence(paper)
-    method = MethodOutput(
-        research_problem=(
-            f"识别 {title} 所解决的核心研究问题及其主要技术路线。"
-        ),
-        proposed_method=(
-            "Demo 模式已成功解析 PDF。配置当前文本模型的 API Key 后，可让真实 MethodAgent "
-            "分析论文中与方法相关的章节。"
-        ),
-        key_components=[
-            "PDF 解析器与章节路由",
-            "MethodAgent 方法分析提示词",
-            "ExperimentAgent 实验分析提示词",
-            "CriticAgent 批判性评审提示词",
-            "SummaryAgent 综合整理步骤",
-        ],
-        innovations=[
-            "结构化的多 Agent 论文研读流程",
-            "面向不同 Agent 的章节路由，减少无关上下文",
-        ],
-        differences_from_prior=(
-            "该 Demo 结果用于证明前后端链路已经连通；在未运行真实 LLM 时，"
-            "不会对论文的具体创新性作出判断。"
-        ),
-        implementation_details="在 Settings 中配置模型厂商与 API Key，即可运行真实结构化分析。",
-        evidence=demo_evidence,
-    )
-    experiment = ExperimentOutput(
-        datasets=["Demo 模式：真实数据集信息需要由 LLM 提取"],
-        metrics=["Demo 模式：真实评估指标需要由 LLM 提取"],
-        main_results=(
-            "后端已收到并成功解析 PDF。配置模型凭证后即可提取真实实验结果。"
-        ),
-        comparison_with_baselines=(
-            "Demo 模式不会虚构基线对比结果。"
-        ),
-        ablation_study=None,
-        notable_findings=[
-            f"解析器共识别出 {len(paper.sections)} 个章节。",
-            f"提取出的正文约包含 {len(paper.full_text):,} 个字符。",
-        ],
-        evidence=demo_evidence,
-    )
-    critic = CriticOutput(
-        novelty_score=3,
-        novelty_justification=(
-            "Demo 模式无法公正评估论文创新性，该占位结果仅用于验证完整响应结构。"
-        ),
-        strengths=[
-            "上传、解析与响应序列化链路已经连通。",
-            "前端能够渲染四个 Agent 的全部输出结构。",
-        ],
-        limitations=[
-            "Demo 模式没有执行真实 LLM 评审。",
-            "针对论文的具体批判性分析需要当前厂商的 API Key 和兼容模型。",
-        ],
-        potential_improvements=[
-            "配置真实模型后重新运行分析。",
-            "在生产环境中为超长论文增加分块处理。",
-        ],
-        broader_impact=None,
-        evidence=demo_evidence,
-    )
-    summary = SummaryOutput(
-        one_sentence_summary=(
-            f"{title} 已成功上传并完成解析；配置真实 LLM Key 后可生成针对该论文的研读笔记。"
-        ),
-        core_contributions=[
-            "前端上传的 PDF 已能到达 Python 后端。",
-            "后端复用了项目现有的 PDF 解析器。",
-            "API 返回与四 Agent 流程一致的结构化数据契约。",
-            "配置模型凭证后即可运行真实 LangGraph 分析流程。",
-        ],
-        method_highlights=method.proposed_method,
-        experiment_highlights=experiment.main_results,
-        limitations_and_future_work=(
-            "当前是确定性的 Demo 响应。在 Settings 中配置模型厂商与 API Key 后，"
-            "即可运行真实多 Agent 分析。"
-        ),
-        reading_notes=(
-            "Demo 模式可在不消耗模型 Token 的情况下验证部署、上传、解析和界面渲染。"
-        ),
-        evidence=demo_evidence,
-    )
-    snippets = build_evidence_index(paper)
-    assessment = build_analysis_assessment(
-        paper,
-        snippets,
-        method,
-        experiment,
-        critic,
-        summary,
-        demo=True,
-    )
-    return {
-        "method_output": method.model_dump(),
-        "experiment_output": experiment.model_dump(),
-        "critic_output": critic.model_dump(),
-        "summary_output": summary.model_dump(),
-        "assessment": assessment.model_dump(),
-    }
-
-
-def _live_outputs(paper: ParsedPaper, pdf_path: Path | None = None) -> dict[str, Any]:
-    if pdf_path is not None:
-        enrich_paper_figures_with_vision(pdf_path, paper)
-    snippets = build_evidence_index(paper)
-    tool_context = (
-        create_codex_tool_context(snippets=snippets, paper=paper, pdf_path=pdf_path)
-        if text_provider_id() == "codex"
-        else None
-    )
-    tool_path = tool_context.path if tool_context else None
-    harness = get_agent_harness()
-    agent_context = AgentRunContext(
-        paper=paper,
-        snippets=snippets,
-        tool_context_path=tool_path,
-    )
-    try:
-        method = harness.run(METHOD_AGENT_SPEC, agent_context).output
-        experiment = harness.run(EXPERIMENT_AGENT_SPEC, agent_context).output
-        critic = harness.run(CRITIC_AGENT_SPEC, agent_context).output
-        summary = harness.run(
-            SUMMARY_AGENT_SPEC,
-            AgentRunContext(tool_context_path=tool_path),
-            input_data=SummaryAgentInput(
-                paper_title=paper.title,
-                method_output=method,
-                experiment_output=experiment,
-                critic_output=critic,
-            ),
-        ).output
-    finally:
-        if tool_context:
-            tool_context.close()
-    assessment = build_analysis_assessment(
-        paper,
-        snippets,
-        method,
-        experiment,
-        critic,
-        summary,
-    )
-    return {
-        "evidence_index": evidence_payload(snippets),
-        "method_output": method.model_dump(),
-        "experiment_output": experiment.model_dump(),
-        "critic_output": critic.model_dump(),
-        "summary_output": summary.model_dump(),
-        "assessment": assessment.model_dump(),
-    }
-
-
 def _stream_event(event_type: str, **payload: Any) -> str:
     return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
 
 
-def _model_runtime_payload() -> dict[str, Any]:
-    """Describe the active route so saved analyses remain reproducible."""
-    text_provider = text_provider_id()
-    visual_provider = vision_provider_id()
-    payload = {
-        "text_provider": text_provider,
-        "text_provider_label": provider_label(text_provider),
-        "text_model": selected_text_model(),
-        "text_model_label": selected_text_model_label(),
-        "text_mode": selected_text_mode(),
-        "vision_enabled": vision_enabled(),
-        "vision_provider": visual_provider,
-        "vision_provider_label": provider_label(visual_provider),
-        "vision_model": selected_vision_model(),
-    }
-    if text_provider == "codex":
-        payload["codex_security_profile"] = (
-            get_codex_sdk_service().status().get("security_profile") or {}
-        )
-    return payload
-
-
 def _missing_model_key_message() -> str:
-    provider_id = text_provider_id()
-    if provider_spec(provider_id).credential_type == "codex_login":
-        return "本机 Codex 尚未登录 ChatGPT，请在 Settings 中连接 Codex 订阅。"
-    return f"{provider_label(provider_id)} API Key 未配置，请在 Settings 中添加当前文本模型所需的密钥。"
+    return missing_model_key_message()
+
+
+def _analysis_http_exception(error: AnalysisOrchestratorError) -> HTTPException:
+    status_code = {
+        "request": 400,
+        "parse": 422,
+        "configuration": 503,
+    }.get(error.category, 500)
+    return HTTPException(status_code=status_code, detail=error.message)
 
 
 def _require_local_codex_request(request: Request) -> None:
@@ -501,429 +271,9 @@ def _drain_agent_events(event_queue: Queue[str]) -> Iterable[str]:
             return
 
 
-def _stream_summary_agent_events(
-    paper_title: str,
-    method_output: MethodOutput,
-    experiment_output: ExperimentOutput,
-    critic_output: CriticOutput,
-    tracker: AnalysisProgressTracker,
-    tool_context_path: Path | None = None,
-) -> Iterable[tuple[str, SummaryOutput | None]]:
-    event_queue: Queue[str] = Queue()
-
-    def emit(event_type: str, payload: dict[str, Any]) -> None:
-        event_queue.put(_stream_event(event_type, **payload))
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            get_agent_harness().run,
-            SUMMARY_AGENT_SPEC,
-            AgentRunContext(
-                tool_context_path=tool_context_path,
-                tracker=tracker,
-                emit=emit,
-                stream=True,
-            ),
-            input_data=SummaryAgentInput(
-                paper_title=paper_title,
-                method_output=method_output,
-                experiment_output=experiment_output,
-                critic_output=critic_output,
-            ),
-        )
-        while not future.done():
-            for event in _drain_agent_events(event_queue):
-                yield event, None
-            time.sleep(0.05)
-
-        for event in _drain_agent_events(event_queue):
-            yield event, None
-        yield "", future.result().output
-
-
-def _stream_demo_analysis(
-    paper: ParsedPaper,
-    filename: str,
-    file_size: int,
-    pdf_data: bytes,
-    tracker: AnalysisProgressTracker | None = None,
-) -> Iterable[str]:
-    tracker = tracker or AnalysisProgressTracker()
-    paper_payload = _paper_payload(paper, filename, file_size)
-    snippets = build_evidence_index(paper)
-    index_payload = evidence_payload(snippets)
-    outputs = _demo_outputs(paper)
-    yield _stream_event("paper", mode="demo", paper=paper_payload, message="PDF parsed")
-    yield _stream_event(
-        "agent_progress",
-        **tracker.progress(
-            "system",
-            f"PDF 解析完成，共识别 {paper_payload['sections_count']} 个章节。",
-            progress_id="paper-parsed",
-        ),
-    )
-    yield _stream_event(
-        "evidence_index",
-        evidence_count=len(index_payload),
-        message=f"Built {len(snippets)} evidence snippets",
-    )
-    yield _stream_event(
-        "agent_progress",
-        **tracker.progress(
-            "system",
-            f"已建立 {len(index_payload)} 个文本、表格或图像证据片段。",
-            progress_id="evidence-index",
-        ),
-    )
-
-    for spec in (METHOD_AGENT_SPEC, EXPERIMENT_AGENT_SPEC, CRITIC_AGENT_SPEC):
-        agent_id = spec.agent_id
-        output_key = spec.output_key
-        yield _stream_event(
-            "agent_started",
-            **tracker.start_agent(agent_id, spec.start_summary),
-        )
-        time.sleep(0.12)
-        yield _stream_event(
-            "agent_progress",
-            **tracker.progress(
-                agent_id,
-                "Demo 模式正在根据已解析的论文内容生成可验证的界面示例。",
-                progress_id=f"{agent_id}-demo",
-            ),
-        )
-        yield _stream_event(
-            "agent_complete",
-            **tracker.complete_agent(agent_id, spec.complete_summary),
-            output_key=output_key,
-            output=public_agent_output(outputs[output_key]),
-        )
-
-    yield _stream_event(
-        "agent_started",
-        **tracker.start_agent("summary", SUMMARY_AGENT_SPEC.start_summary),
-    )
-    time.sleep(0.12)
-    yield _stream_event(
-        "agent_complete",
-        **tracker.complete_agent("summary", SUMMARY_AGENT_SPEC.complete_summary),
-        output_key="summary_output",
-        output=outputs["summary_output"],
-    )
-    analysis_process = tracker.finish()
-    result_payload = {
-        "mode": "demo",
-        "analysis_id": None,
-        "model_config": _model_runtime_payload(),
-        "paper": paper_payload,
-        "evidence_index": index_payload,
-        "analysis_process": analysis_process,
-        **outputs,
-    }
-    history_id: str | None = None
-    try:
-        history_id = save_paper_analysis(
-            pdf_data=pdf_data,
-            result=result_payload,
-            snippets=snippets,
-            paper_manifest=build_codex_paper_manifest(paper),
-        )
-    except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
-        yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
-    yield _stream_event(
-        "complete",
-        history_id=history_id,
-        **public_analysis_payload(result_payload),
-    )
-
-
-def _stream_live_analysis(
-    paper: ParsedPaper,
-    filename: str,
-    file_size: int,
-    pdf_data: bytes,
-    pdf_path: Path | None = None,
-    tracker: AnalysisProgressTracker | None = None,
-) -> Iterable[str]:
-    tracker = tracker or AnalysisProgressTracker()
-    paper_payload = _paper_payload(paper, filename, file_size)
-    yield _stream_event("paper", mode="live", paper=paper_payload, message="PDF parsed")
-    yield _stream_event(
-        "agent_progress",
-        **tracker.progress(
-            "system",
-            f"PDF 解析完成，共识别 {paper_payload['sections_count']} 个章节。",
-            progress_id="paper-parsed",
-        ),
-    )
-    if pdf_path is not None:
-        yield _stream_event(
-            "vision_started",
-            message=f"Vision enrichment started for {len(paper.figures)} visual candidates",
-        )
-        yield _stream_event(
-            "agent_progress",
-            **tracker.progress(
-                "system",
-                f"正在检查 {len(paper.figures)} 个图表候选区域并补充视觉证据。",
-                progress_id="vision",
-            ),
-        )
-        try:
-            vision_result = enrich_paper_figures_with_vision(pdf_path, paper)
-            yield _stream_event(
-                "vision_complete",
-                total_figures=vision_result.total_figures,
-                attempted=vision_result.attempted,
-                enriched=vision_result.enriched,
-                skipped=vision_result.skipped,
-                errors=vision_result.errors,
-                message=(
-                    f"Vision enrichment complete: {vision_result.enriched}/"
-                    f"{vision_result.total_figures} figures enriched"
-                ),
-            )
-            yield _stream_event(
-                "agent_progress",
-                **tracker.progress(
-                    "system",
-                    f"视觉检查完成，已补充 {vision_result.enriched} 个图表摘要。",
-                    progress_id="vision",
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 - keep text/table analysis alive
-            yield _stream_event("vision_error", message=f"Vision enrichment failed: {exc}")
-            yield _stream_event(
-                "agent_progress",
-                **tracker.progress(
-                    "system",
-                    "视觉摘要不可用，分析将继续使用正文、表格和图注证据。",
-                    progress_id="vision",
-                ),
-            )
-    snippets = build_evidence_index(paper)
-    index_payload = evidence_payload(snippets)
-    tool_context = (
-        create_codex_tool_context(
-            snippets=snippets,
-            paper=paper,
-            pdf_path=pdf_path,
-        )
-        if text_provider_id() == "codex"
-        else None
-    )
-    tool_path = tool_context.path if tool_context else None
-    yield _stream_event(
-        "evidence_index",
-        evidence_count=len(index_payload),
-        message=f"Built {len(snippets)} evidence snippets",
-    )
-    yield _stream_event(
-        "agent_progress",
-        **tracker.progress(
-            "system",
-            f"已建立 {len(index_payload)} 个文本、表格或图像证据片段。",
-            progress_id="evidence-index",
-        ),
-    )
-
-    outputs: dict[str, Any] = {}
-    event_queue: Queue[str] = Queue()
-
-    def emit_agent_event(event_type: str, payload: dict[str, Any]) -> None:
-        event_queue.put(_stream_event(event_type, **payload))
-
-    agent_specs = (
-        METHOD_AGENT_SPEC,
-        EXPERIMENT_AGENT_SPEC,
-        CRITIC_AGENT_SPEC,
-    )
-    harness = get_agent_harness()
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {}
-        for spec in agent_specs:
-            futures[
-                executor.submit(
-                    harness.run,
-                    spec,
-                    AgentRunContext(
-                        paper=paper,
-                        snippets=snippets,
-                        tool_context_path=tool_path,
-                        tracker=tracker,
-                        emit=emit_agent_event,
-                        stream=True,
-                    ),
-                )
-            ] = (
-                spec.agent_id,
-                spec.output_key,
-            )
-
-        pending = set(futures)
-        while pending:
-            for event in _drain_agent_events(event_queue):
-                yield event
-
-            completed = [future for future in pending if future.done()]
-            for future in completed:
-                pending.remove(future)
-                agent_id, output_key = futures[future]
-                try:
-                    agent_result = future.result()
-                except AgentHarnessError as exc:
-                    yield _stream_event(
-                        "error",
-                        message=f"{agent_id} failed ({exc.category}): {exc.cause}",
-                        **exc.failure_payload,
-                        analysis_process=tracker.finish(status="failed"),
-                    )
-                    if tool_context:
-                        tool_context.close()
-                    return
-                except Exception as exc:  # noqa: BLE001 - guard executor failures
-                    failed_process = tracker.fail_agent(
-                        agent_id,
-                        f"{agent_id} 分析失败，无法生成可靠结果。",
-                    )
-                    yield _stream_event(
-                        "error",
-                        message=f"{agent_id} failed: {exc}",
-                        **failed_process,
-                        analysis_process=tracker.finish(status="failed"),
-                    )
-                    if tool_context:
-                        tool_context.close()
-                    return
-
-                output_payload = agent_result.output.model_dump()
-                outputs[output_key] = output_payload
-
-            if pending:
-                time.sleep(0.05)
-
-        for event in _drain_agent_events(event_queue):
-            yield event
-
-    try:
-        method_model = MethodOutput.model_validate(outputs["method_output"])
-        experiment_model = ExperimentOutput.model_validate(outputs["experiment_output"])
-        critic_model = CriticOutput.model_validate(outputs["critic_output"])
-        summary_model: SummaryOutput | None = None
-        for event, maybe_summary in _stream_summary_agent_events(
-            paper.title,
-            method_model,
-            experiment_model,
-            critic_model,
-            tracker,
-            tool_path,
-        ):
-            if event:
-                yield event
-            if maybe_summary:
-                summary_model = maybe_summary
-        if summary_model is None:
-            raise RuntimeError("SummaryAgent finished without a parsed result.")
-        summary_output = summary_model
-    except AgentHarnessError as exc:
-        yield _stream_event(
-            "error",
-            message=f"summary failed ({exc.category}): {exc.cause}",
-            **exc.failure_payload,
-            analysis_process=tracker.finish(status="failed"),
-        )
-        if tool_context:
-            tool_context.close()
-        return
-    except Exception as exc:  # noqa: BLE001 - guard summary executor failures
-        failed_process = tracker.fail_agent(
-            "summary",
-            "总结 Agent 失败，无法生成可靠的最终笔记。",
-        )
-        yield _stream_event(
-            "error",
-            message=f"summary failed: {exc}",
-            **failed_process,
-            analysis_process=tracker.finish(status="failed"),
-        )
-        if tool_context:
-            tool_context.close()
-        return
-
-    if tool_context:
-        tool_context.close()
-
-    outputs["summary_output"] = summary_output.model_dump()
-    outputs["assessment"] = build_analysis_assessment(
-        paper,
-        snippets,
-        method_model,
-        experiment_model,
-        critic_model,
-        summary_output,
-    ).model_dump()
-    analysis_id = store_analysis_session(
-        snippets,
-        {
-            "mode": "live",
-            "model_config": _model_runtime_payload(),
-            "paper": paper_payload,
-            "evidence_index": index_payload,
-            **outputs,
-        },
-    )
-    analysis_process = tracker.finish()
-    result_payload = {
-        "mode": "live",
-        "analysis_id": analysis_id,
-        "model_config": _model_runtime_payload(),
-        "paper": paper_payload,
-        "evidence_index": index_payload,
-        "analysis_process": analysis_process,
-        **outputs,
-    }
-    history_id: str | None = None
-    try:
-        history_id = save_paper_analysis(
-            pdf_data=pdf_data,
-            result=result_payload,
-            snippets=snippets,
-            paper_manifest=build_codex_paper_manifest(paper),
-        )
-    except Exception as exc:  # noqa: BLE001 - preserve analysis if storage fails
-        yield _stream_event("history_error", message=f"Could not save paper history: {exc}")
-    yield _stream_event(
-        "complete",
-        history_id=history_id,
-        **public_analysis_payload(result_payload),
-    )
-
-
-def _stream_analyze_response(
-    filename: str,
-    data: bytes,
-    *,
-    demo: bool,
-) -> Iterable[str]:
-    tracker = AnalysisProgressTracker()
-    yield _stream_event("analysis_started", **tracker.started_payload())
-    with tempfile.TemporaryDirectory(prefix="paper-reader-") as tmpdir:
-        pdf_path = Path(tmpdir) / filename
-        pdf_path.write_bytes(data)
-        try:
-            parsed = parse_pdf(pdf_path)
-        except Exception as exc:  # noqa: BLE001 - stream parser details for UI
-            yield _stream_event(
-                "error",
-                message=f"Could not parse PDF: {exc}",
-                analysis_process=tracker.finish(status="failed"),
-            )
-            return
-
-        if demo:
-            yield from _stream_demo_analysis(parsed, filename, len(data), data, tracker)
-        else:
-            yield from _stream_live_analysis(parsed, filename, len(data), data, pdf_path, tracker)
+def _serialize_analysis_events(events: Iterable[AnalysisEvent]) -> Iterable[str]:
+    for event in events:
+        yield _stream_event(event.type, **event.payload)
 
 
 def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[str]:
@@ -1577,7 +927,7 @@ async def preview_paper(file: UploadFile = File(...)) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - return actionable parser details
             raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
 
-    return {"paper": _paper_payload(parsed, filename, len(data))}
+    return {"paper": build_paper_payload(parsed, filename, len(data))}
 
 
 @app.post("/api/analyze")
@@ -1585,7 +935,7 @@ async def analyze_paper(
     file: UploadFile = File(...),
     demo: bool = Query(default=False, description="Return deterministic demo output."),
 ) -> dict[str, Any]:
-    """Upload a PDF, parse it, and run the paper-reading pipeline."""
+    """Run one complete paper-analysis task through the Orchestrator."""
     filename = Path(file.filename or "paper.pdf").name or "paper.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
@@ -1594,65 +944,17 @@ async def analyze_paper(
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
 
-    with tempfile.TemporaryDirectory(prefix="paper-reader-") as tmpdir:
-        pdf_path = Path(tmpdir) / filename
-        pdf_path.write_bytes(data)
-        try:
-            parsed = parse_pdf(pdf_path)
-        except Exception as exc:  # noqa: BLE001 - preserve useful parser details for UI
-            raise HTTPException(status_code=422, detail=f"Could not parse PDF: {exc}") from exc
-
-        if demo:
-            outputs = _demo_outputs(parsed)
-            mode = "demo"
-        else:
-            if not is_llm_configured():
-                raise HTTPException(
-                    status_code=503,
-                    detail=_missing_model_key_message(),
-                )
-            try:
-                outputs = _live_outputs(parsed, pdf_path)
-            except Exception as exc:  # noqa: BLE001 - return actionable UI error
-                raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
-            mode = "live"
-
-    paper_payload = _paper_payload(parsed, filename, len(data))
-    snippets = build_evidence_index(parsed)
-    index_payload = outputs.get("evidence_index")
-    if not isinstance(index_payload, list):
-        index_payload = evidence_payload(snippets)
-        outputs["evidence_index"] = index_payload
-    analysis_id: str | None = None
-    if mode == "live":
-        analysis_id = store_analysis_session(
-            snippets,
-            {
-                "mode": mode,
-                "model_config": _model_runtime_payload(),
-                "paper": paper_payload,
-                **outputs,
-            },
-        )
-
-    result_payload = {
-        "mode": mode,
-        "analysis_id": analysis_id,
-        "model_config": _model_runtime_payload(),
-        "paper": paper_payload,
-        **outputs,
-    }
     try:
-        result_payload["history_id"] = save_paper_analysis(
-            pdf_data=data,
-            result=result_payload,
-            snippets=snippets,
-            paper_manifest=build_codex_paper_manifest(parsed),
+        result = ANALYSIS_ORCHESTRATOR.run(
+            AnalysisRequest(
+                filename=filename,
+                pdf_data=data,
+                demo=demo,
+            )
         )
-    except Exception as exc:  # noqa: BLE001 - return analysis with an actionable warning
-        result_payload["history_id"] = None
-        result_payload["history_warning"] = f"Could not save paper history: {exc}"
-    return public_analysis_payload(result_payload)
+    except AnalysisOrchestratorError as exc:
+        raise _analysis_http_exception(exc) from exc
+    return result.as_dict()
 
 
 @app.post("/api/analyze/stream")
@@ -1660,7 +962,7 @@ async def analyze_paper_stream(
     file: UploadFile = File(...),
     demo: bool = Query(default=False, description="Return deterministic demo output."),
 ) -> StreamingResponse:
-    """Upload a PDF and stream parsing, agent, and final analysis events."""
+    """Stream transport-neutral Orchestrator events as newline-delimited JSON."""
     filename = Path(file.filename or "paper.pdf").name or "paper.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
@@ -1668,14 +970,21 @@ async def analyze_paper_stream(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
-    if not demo and not is_llm_configured():
-        raise HTTPException(
-            status_code=503,
-            detail=_missing_model_key_message(),
-        )
+
+    analysis_request = AnalysisRequest(
+        filename=filename,
+        pdf_data=data,
+        demo=demo,
+    )
+    try:
+        ANALYSIS_ORCHESTRATOR.validate(analysis_request)
+    except AnalysisOrchestratorError as exc:
+        raise _analysis_http_exception(exc) from exc
 
     return StreamingResponse(
-        _stream_analyze_response(filename, data, demo=demo),
+        _serialize_analysis_events(
+            ANALYSIS_ORCHESTRATOR.stream(analysis_request)
+        ),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",

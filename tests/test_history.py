@@ -1,14 +1,15 @@
 """Tests for persistent paper analysis history."""
 
 import os
-import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import _stream_demo_analysis, history_analysis, paper_history
+from app import history_analysis, paper_history
+from core.analysis_events import AnalysisRequest
+from core.analysis_orchestrator import PaperAnalysisOrchestrator
 from core.chat import clear_analysis_sessions, get_analysis_session
 from core.evidence import EvidenceSnippet
 from core.history import (
@@ -135,13 +136,15 @@ class TestPaperHistory(unittest.TestCase):
             sections=[Section("Abstract", "Persistent evidence text.", 0, 0)],
         )
 
+        orchestrator = PaperAnalysisOrchestrator(parser=lambda _path: paper)
         events = [
-            json.loads(event)
-            for event in _stream_demo_analysis(
-                paper,
-                "streamed.pdf",
-                24,
-                b"%PDF-1.7 streamed paper",
+            event.as_dict()
+            for event in orchestrator.stream(
+                AnalysisRequest(
+                    filename="streamed.pdf",
+                    pdf_data=b"%PDF-1.7 streamed paper",
+                    demo=True,
+                )
             )
         ]
         complete = next(event for event in events if event["type"] == "complete")

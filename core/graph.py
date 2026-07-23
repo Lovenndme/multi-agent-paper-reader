@@ -1,5 +1,6 @@
 """LangGraph workflow: fan-out to three parallel agents, fan-in to summary agent."""
 
+from dataclasses import replace
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +22,7 @@ class PaperState(TypedDict, total=False):
     # Input
     parsed_paper: ParsedPaper
     evidence_index: list[EvidenceSnippet]
+    agent_context: AgentRunContext
 
     # Parallel agent outputs
     method_output: MethodOutput
@@ -32,36 +34,52 @@ class PaperState(TypedDict, total=False):
     assessment: AnalysisAssessment
 
 
+class GraphStageError(RuntimeError):
+    """Identify a non-Agent graph stage without hiding the original cause."""
+
+    def __init__(self, stage: str, cause: Exception) -> None:
+        super().__init__(f"{stage} stage failed: {cause}")
+        self.stage = stage
+        self.cause = cause
+
+
 # --- Node functions ---
 
 def evidence_node(state: PaperState) -> dict:
+    if "evidence_index" in state:
+        return {"evidence_index": state["evidence_index"]}
     paper = state["parsed_paper"]
     return {"evidence_index": build_evidence_index(paper)}
 
 
+def _run_context(state: PaperState) -> AgentRunContext:
+    return replace(
+        state.get("agent_context") or AgentRunContext(),
+        paper=state["parsed_paper"],
+        snippets=state["evidence_index"],
+    )
+
+
 def method_node(state: PaperState) -> dict:
-    paper = state["parsed_paper"]
     result = get_agent_harness().run(
         METHOD_AGENT_SPEC,
-        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+        _run_context(state),
     )
     return {"method_output": result.output}
 
 
 def experiment_node(state: PaperState) -> dict:
-    paper = state["parsed_paper"]
     result = get_agent_harness().run(
         EXPERIMENT_AGENT_SPEC,
-        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+        _run_context(state),
     )
     return {"experiment_output": result.output}
 
 
 def critic_node(state: PaperState) -> dict:
-    paper = state["parsed_paper"]
     result = get_agent_harness().run(
         CRITIC_AGENT_SPEC,
-        AgentRunContext(paper=paper, snippets=state["evidence_index"]),
+        _run_context(state),
     )
     return {"critic_output": result.output}
 
@@ -70,6 +88,7 @@ def summary_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
     result = get_agent_harness().run(
         SUMMARY_AGENT_SPEC,
+        _run_context(state),
         input_data=SummaryAgentInput(
             paper_title=paper.title,
             method_output=state["method_output"],
@@ -82,8 +101,8 @@ def summary_node(state: PaperState) -> dict:
 
 def assessment_node(state: PaperState) -> dict:
     """Calculate transparent novelty and reliability scores after all agents finish."""
-    return {
-        "assessment": build_analysis_assessment(
+    try:
+        assessment = build_analysis_assessment(
             state["parsed_paper"],
             state["evidence_index"],
             state["method_output"],
@@ -91,7 +110,9 @@ def assessment_node(state: PaperState) -> dict:
             state["critic_output"],
             state["summary_output"],
         )
-    }
+    except Exception as exc:
+        raise GraphStageError("assessment", exc) from exc
+    return {"assessment": assessment}
 
 
 # --- Build the graph ---
@@ -129,8 +150,18 @@ def run_pipeline(parsed_paper: ParsedPaper) -> SummaryOutput:
     return final_state["summary_output"]
 
 
-def run_pipeline_with_state(parsed_paper: ParsedPaper) -> PaperState:
+def run_pipeline_with_state(
+    parsed_paper: ParsedPaper,
+    *,
+    evidence_index: list[EvidenceSnippet] | None = None,
+    agent_context: AgentRunContext | None = None,
+) -> PaperState:
     """Run the full pipeline and return intermediate agent outputs too."""
     app = build_graph()
-    final_state = app.invoke({"parsed_paper": parsed_paper})
+    initial_state: PaperState = {"parsed_paper": parsed_paper}
+    if evidence_index is not None:
+        initial_state["evidence_index"] = evidence_index
+    if agent_context is not None:
+        initial_state["agent_context"] = agent_context
+    final_state = app.invoke(initial_state)
     return final_state
