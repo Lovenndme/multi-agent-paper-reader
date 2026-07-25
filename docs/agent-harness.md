@@ -15,10 +15,18 @@ PaperAnalysisOrchestrator
         |
         v
  AgentHarness
-   |- 按 Agent 意图选择证据
+   |- 按 Agent 意图生成确定性 seed evidence
+   |- 调用 AgenticRetrievalRuntime 按需补检索
    |- 生成公开生命周期事件
    |- 汇总公开过程摘要与工具活动
    |- 校验结构化输出并归类错误
+        |
+        v
+ AgenticRetrievalRuntime
+   |- 原生工具调用（可用时）
+   |- 全厂商结构化动作回退
+   |- 工具/证据/字符/循环预算
+   `- 公开检索事件与 checkpoint
         |
         v
  AgentRuntime
@@ -45,6 +53,7 @@ PaperAnalysisOrchestrator
 - Prompt 消息构造函数；
 - 开始、完成、失败时的公开摘要；
 - 可选的证据检索意图和证据数量/字符预算；
+- 可选的 Agentic retrieval goal；
 - 流式与非流式重试策略。
 
 Method、Experiment、Critic、Summary 和 Comparison 都已使用同一契约。
@@ -53,13 +62,15 @@ Method、Experiment、Critic、Summary 和 Comparison 都已使用同一契约�
 
 `core/agent_harness.py` 是 Agent 的统一外层控制面。每次运行会：
 
-1. 根据 `retrieval_profile` 从当前论文证据索引中按需选取片段；
-2. 构造 Agent 消息；
-3. 通过 `AnalysisProgressTracker` 发出 `agent_started`；
-4. 将 Runtime 提供的公开过程摘要和工具活动转换为 `agent_progress`；
-5. 调用 Runtime 并再次校验 Pydantic schema；
-6. 发出带公开结果的 `agent_complete`；
-7. 失败时更新 tracker，并归类为 `timeout`、`rate_limit`、`schema`、
+1. 根据 `retrieval_profile` 从当前论文证据索引中生成确定性 seed；
+2. 当 `RAG_MODE=agentic` 时，调用通用 Agentic Runtime，让模型在只读工具中
+   自主补充证据并判断停止；
+3. 构造最终 Agent 消息；
+4. 通过 `AnalysisProgressTracker` 发出 `agent_started`；
+5. 将公开检索事件、过程摘要和工具活动写入过程记录；
+6. 调用结构化 Agent Runtime 并再次校验 Pydantic schema；
+7. 发出带公开结果的 `agent_complete`；
+8. 失败时更新 tracker，并归类为 `timeout`、`rate_limit`、`schema`、
    `tool` 或 `runtime`。
 
 Harness 只展示模型明确提供的公开过程摘要，不暴露私有隐藏思维链，也不会把
@@ -79,11 +90,19 @@ Harness 只展示模型明确提供的公开过程摘要，不暴露私有隐藏
 
 Runtime 不负责论文检索、Prompt 业务内容、Web 事件或持久化。
 
+### AgenticRetrievalRuntime
+
+`core/agentic_runtime.py` 位于 Harness 与论文工具之间。它只负责一次有界的
+“选择动作 → 执行工具 → 返回观察 → 决定继续/停止”循环。原生 `bind_tools`
+失败时会切换到所有厂商都能执行的 `RetrievalDecision`，不会切换模型厂商。
+工具实现与安全边界见 `docs/agentic-rag.md`。
+
 ## 调用路径
 
 - FastAPI 单论文接口只调用 `PaperAnalysisOrchestrator` 并序列化事件。
 - Orchestrator 负责解析、视觉检查、证据、持久化和完整任务状态。
-- LangGraph 负责三个专业 Agent 的并行依赖、Summary fan-in 与 Assessment；
+- LangGraph 负责三个专业 Agent 的并行依赖、Evidence Supervisor、一次可选 repair、
+  Summary fan-in 与 Assessment；
   实际 Agent 执行统一委托给 Harness。
 - 原有 `run_*_agent` / `stream_*_agent` 函数保留为兼容入口，但其内部同样调用
   Harness，不再直接调用模型。
@@ -99,9 +118,9 @@ Runtime 不负责论文检索、Prompt 业务内容、Web 事件或持久化。
 4. 为检索、事件、结构校验和错误路径补充测试；
 5. 不在编排代码中重复实现重试、进度缓冲或 provider 判断。
 
-## 第一版边界
+## 当前边界
 
 - 继续复用现有 `utils.llm` 厂商适配，不改变模型配置与认证方式；
-- 保持既有 Web 流式事件及前端展示契约；
-- 不引入新的队列、分布式调度器或外部数据库；
-- Runtime 元数据目前用于单次执行诊断，尚未新增独立持久化表。
+- 只增加向后兼容的检索事件，最终 Agent 输出 schema 保持不变；
+- 不引入外部队列、分布式调度器或外部数据库；
+- checkpoint 是本机公开工具状态日志，不保存 prompt，也不恢复中断中的模型调用。

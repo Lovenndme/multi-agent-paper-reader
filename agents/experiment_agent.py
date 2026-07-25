@@ -28,6 +28,12 @@ EXPERIMENT_AGENT_SPEC = AgentSpec(
     complete_summary="实验分析已完成，数据集、指标、基线和结果已核对。",
     failed_summary="实验分析失败，无法生成可靠结果。",
     retrieval_profile="experiment",
+    retrieval_goal=(
+        "Locate original-paper evidence for datasets, splits, baselines, metrics, "
+        "quantitative results, ablations, efficiency, and experimental conditions. "
+        "Prefer tables when they contain the exact reported values."
+    ),
+    agentic_retrieval=True,
 )
 
 

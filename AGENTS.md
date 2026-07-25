@@ -18,10 +18,11 @@
 ```text
 PDF / HTTP -> PaperAnalysisOrchestrator
     -> 解析与版面/视觉提取 -> 证据索引
-    -> LangGraph（专业 Agent 并行与 Summary 汇合）
-    -> Agent Harness（检索、生命周期、进度、校验）
+    -> LangGraph（专业 Agent 并行、证据监督/一次修复、Summary 汇合）
+    -> Agent Harness（Agentic 检索、生命周期、进度、校验）
+    -> Agentic Runtime（原生工具调用 + 结构化动作回退）
     -> Agent Runtime（模型调用、流式适配、重试）
-    -> Method / Experiment / Critic Agent
+    -> Method / Experiment / Critic / Evidence Supervisor Agent
     -> Summary Agent -> 结构化分析与论文追问
 ```
 
@@ -34,6 +35,7 @@ Agent 的声明式契约位于各自 `agents/*_agent.py` 的 `AgentSpec` 中。W
 LangGraph 和兼容入口必须通过 `core/agent_harness.py` 调用，
 不得绕过 Harness 直接调用 `utils/llm.py`。Runtime 与厂商适配边界详见
 `docs/agent-harness.md`，完整任务边界详见 `docs/analysis-orchestrator.md`。
+通用论文工具、双策略检索循环、预算和安全边界详见 `docs/agentic-rag.md`。
 
 修改结构化输出时，必须同步检查 `core/schemas.py`、相关 Agent、提示词、
 汇总逻辑、API 响应、前端渲染和测试，不能只修改其中一层。

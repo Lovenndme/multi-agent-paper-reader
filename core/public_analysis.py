@@ -51,6 +51,7 @@ def public_agent_output(output: dict[str, Any]) -> dict[str, Any]:
 def public_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a cleaned single-paper API payload while preserving internal storage."""
     public = copy.deepcopy(payload)
+    public.pop("_agentic_rag", None)
     evidence_index = public.pop("evidence_index", None)
     if isinstance(evidence_index, list):
         public["evidence_count"] = len(evidence_index)

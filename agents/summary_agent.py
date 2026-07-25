@@ -58,6 +58,11 @@ SUMMARY_AGENT_SPEC = AgentSpec(
     start_summary="已收到三个专业 Agent 的结构化结论，正在综合冲突与不确定性并生成最终笔记。",
     complete_summary="最终研读笔记已完成，已保留上游结论中的不确定性与冲突。",
     failed_summary="总结 Agent 失败，无法生成可靠的最终笔记。",
+    retrieval_goal=(
+        "Verify the most consequential or conflicting claims from the three specialist "
+        "outputs against exact original-paper evidence before synthesizing the final note."
+    ),
+    agentic_retrieval=True,
 )
 
 

@@ -28,6 +28,12 @@ CRITIC_AGENT_SPEC = AgentSpec(
     complete_summary="批判性评审已完成，创新性、优点、局限和改进方向已整理。",
     failed_summary="批判性评审失败，无法生成可靠结果。",
     retrieval_profile="critic",
+    retrieval_goal=(
+        "Locate original-paper evidence for assumptions, limitations, failure cases, "
+        "threats to validity, novelty claims, comparisons with prior work, discussion, "
+        "and future work."
+    ),
+    agentic_retrieval=True,
 )
 
 

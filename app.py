@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from agents.comparison_agent import stream_comparison_agent
+from core.agentic_types import agentic_rag_mode, agentic_tool_strategy
 from core.analysis_events import AnalysisEvent, AnalysisOrchestratorError, AnalysisRequest
 from core.analysis_orchestrator import (
     build_paper_payload,
@@ -298,7 +299,6 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 conversation = None
             conversation_id = conversation["id"] if conversation else None
             effective_request = request.model_copy(update={"conversation_id": conversation_id})
-            prompt = build_chat_prompt(effective_request)
             user_message = add_conversation_message(
                 conversation_id,
                 role="user",
@@ -314,9 +314,28 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 yield _stream_event("token", text=token)
                 time.sleep(0.015)
         else:
+            retrieval_events: Queue[str] = Queue()
+
+            def emit_retrieval(event_type: str, payload: dict[str, Any]) -> None:
+                retrieval_events.put(_stream_event(event_type, **payload))
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                prompt_future = executor.submit(
+                    build_chat_prompt,
+                    effective_request,
+                    agentic=True,
+                    retrieval_emit=emit_retrieval,
+                )
+                while not prompt_future.done():
+                    for event in _drain_agent_events(retrieval_events):
+                        yield event
+                    time.sleep(0.05)
+                for event in _drain_agent_events(retrieval_events):
+                    yield event
+                prompt = prompt_future.result()
             for token in stream_chat_reply(
                 effective_request,
-                messages=prompt.messages if prompt else None,
+                messages=prompt.messages,
                 trace=model_trace,
             ):
                 answer_chunks.append(token)
@@ -413,8 +432,20 @@ def _stream_comparison_response(
             def on_token(token: str) -> None:
                 event_queue.put(_stream_event("comparison_token", text=token))
 
+            def on_agent_event(
+                event_type: str,
+                payload: dict[str, Any],
+            ) -> None:
+                event_queue.put(_stream_event(event_type, **payload))
+
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(stream_comparison_agent, sources, request, on_token)
+                future = executor.submit(
+                    stream_comparison_agent,
+                    sources,
+                    request,
+                    on_token,
+                    on_agent_event,
+                )
                 while not future.done():
                     for event in _drain_agent_events(event_queue):
                         yield event
@@ -461,7 +492,7 @@ def _stream_comparison_chat_response(
             conversation = create_comparison_conversation(request.comparison_id)
             conversation_id = conversation["id"]
         effective_request = request.model_copy(update={"conversation_id": conversation_id})
-        prompt = None if demo else build_comparison_chat_prompt(effective_request)
+        prompt = None
         model_trace: dict[str, Any] | None = None if demo else {}
         user_message = add_comparison_message(
             conversation_id,
@@ -478,9 +509,28 @@ def _stream_comparison_chat_response(
                 yield _stream_event("token", text=token)
                 time.sleep(0.015)
         else:
+            retrieval_events: Queue[str] = Queue()
+
+            def emit_retrieval(event_type: str, payload: dict[str, Any]) -> None:
+                retrieval_events.put(_stream_event(event_type, **payload))
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                prompt_future = executor.submit(
+                    build_comparison_chat_prompt,
+                    effective_request,
+                    agentic=True,
+                    retrieval_emit=emit_retrieval,
+                )
+                while not prompt_future.done():
+                    for event in _drain_agent_events(retrieval_events):
+                        yield event
+                    time.sleep(0.05)
+                for event in _drain_agent_events(retrieval_events):
+                    yield event
+                prompt = prompt_future.result()
             for token in stream_comparison_chat_reply(
                 effective_request,
-                messages=prompt.messages if prompt else None,
+                messages=prompt.messages,
                 trace=model_trace,
             ):
                 answer_chunks.append(token)
@@ -543,6 +593,8 @@ def health() -> dict[str, Any]:
         "vision_configured": is_vision_configured(),
         "vision_provider": vision_provider_id(),
         "vision_model": selected_vision_model(),
+        "rag_mode": agentic_rag_mode(),
+        "agentic_tool_strategy": agentic_tool_strategy(),
     }
 
 

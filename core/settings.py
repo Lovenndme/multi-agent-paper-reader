@@ -17,6 +17,7 @@ from openai import OpenAI
 from pydantic import BaseModel, SecretStr
 
 from core.model_health import invalidate_model_catalog_health_cache
+from core.agentic_types import AgenticRunBudget, agentic_rag_mode, agentic_tool_strategy
 from core.model_providers import (
     ModelModeSpec,
     ModelSpec,
@@ -25,6 +26,7 @@ from core.model_providers import (
     model_is_known,
     model_modes,
     provider_api_key,
+    provider_agentic_capability,
     provider_base_url,
     provider_credential_configured,
     provider_label,
@@ -168,6 +170,17 @@ def application_settings_payload() -> dict[str, Any]:
                 "customizable": spec.customizable,
                 "provider_name": provider_label(spec.id),
                 "supports_vision": bool(vision_models),
+                "agentic_rag": {
+                    "native_tool_calling": provider_agentic_capability(
+                        spec.id
+                    ).native_tool_calling,
+                    "structured_actions": provider_agentic_capability(
+                        spec.id
+                    ).structured_actions,
+                    "native_transport": provider_agentic_capability(
+                        spec.id
+                    ).native_transport,
+                },
                 "default_text_model": text_models[0].id if text_models else None,
                 "default_vision_model": vision_models[0].id if vision_models else None,
                 "text_models": [model.payload() for model in text_models],
@@ -179,6 +192,16 @@ def application_settings_payload() -> dict[str, Any]:
         "version": PROJECT_VERSION,
         "provider": provider_label(active_text_provider),
         "api_key_configured": text_configured,
+        "agentic_rag": {
+            "mode": agentic_rag_mode(),
+            "tool_strategy": agentic_tool_strategy(),
+            "max_steps": AgenticRunBudget.from_env().max_steps,
+            "checkpoints": os.environ.get(
+                "AGENTIC_RAG_CHECKPOINTS",
+                "true",
+            ).strip().lower()
+            not in {"0", "false", "no", "off"},
+        },
         "routing": {
             "text": {
                 "provider": active_text_provider,

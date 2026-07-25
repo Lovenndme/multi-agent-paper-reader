@@ -13,6 +13,15 @@ CredentialType = Literal["api_key", "codex_login"]
 
 
 @dataclass(frozen=True)
+class AgenticCapability:
+    """Declared and safely degradable Agentic RAG capabilities."""
+
+    native_tool_calling: bool
+    structured_actions: bool = True
+    native_transport: str = "none"
+
+
+@dataclass(frozen=True)
 class ModelModeSpec:
     id: str
     label: str
@@ -398,11 +407,36 @@ PROVIDERS: dict[str, ProviderSpec] = {
 }
 
 
+# Native support is an optimization only. Every provider retains the
+# provider-neutral structured-action loop when a model or compatible endpoint
+# rejects tool binding at runtime.
+AGENTIC_CAPABILITIES: dict[str, AgenticCapability] = {
+    "openai": AgenticCapability(True, native_transport="openai"),
+    "anthropic": AgenticCapability(True, native_transport="anthropic"),
+    "zhipu": AgenticCapability(True, native_transport="openai-compatible"),
+    "deepseek": AgenticCapability(True, native_transport="openai-compatible"),
+    "kimi": AgenticCapability(True, native_transport="openai-compatible"),
+    "qwen": AgenticCapability(True, native_transport="openai-compatible"),
+    "doubao": AgenticCapability(True, native_transport="openai-compatible"),
+    "custom": AgenticCapability(False, native_transport="unknown"),
+    # Codex already receives the richer local MCP tool context during its final
+    # agent invocation; the host-side planner uses structured actions only when
+    # explicitly needed.
+    "codex": AgenticCapability(False, native_transport="mcp"),
+}
+
+
 def provider_spec(provider_id: str) -> ProviderSpec:
     try:
         return PROVIDERS[provider_id]
     except KeyError as exc:
         raise ValueError(f"不支持的模型厂商：{provider_id}") from exc
+
+
+def provider_agentic_capability(provider_id: str | None = None) -> AgenticCapability:
+    """Return a conservative capability declaration for one provider route."""
+    resolved = provider_id or text_provider_id()
+    return AGENTIC_CAPABILITIES.get(resolved, AgenticCapability(False))
 
 
 def infer_provider_id() -> str:

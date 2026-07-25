@@ -28,6 +28,12 @@ METHOD_AGENT_SPEC = AgentSpec(
     complete_summary="方法分析已完成，研究问题、关键组件和创新点已整理。",
     failed_summary="方法分析失败，无法生成可靠结果。",
     retrieval_profile="method",
+    retrieval_goal=(
+        "Locate original-paper evidence for the research problem, proposed method, "
+        "architecture, algorithm, objective, training procedure, implementation details, "
+        "and claimed differences from prior work."
+    ),
+    agentic_retrieval=True,
 )
 
 

@@ -28,6 +28,14 @@ test("builds a readable process trace without structured tokens", () => {
     elapsed_ms: 2200,
   });
   process = applyAnalysisProcessEvent(process, {
+    type: "tool_complete",
+    agent: "method",
+    step: 1,
+    tool: "paper_search",
+    summary: "已检索到 3 个相关证据片段。",
+    elapsed_ms: 2500,
+  });
+  process = applyAnalysisProcessEvent(process, {
     type: "agent_complete",
     agent: "method",
     summary: "方法分析已完成。",
@@ -37,7 +45,8 @@ test("builds a readable process trace without structured tokens", () => {
 
   assert.equal(process.agents.method.status, "complete");
   assert.equal(process.agents.method.duration_ms, 3100);
-  assert.equal(process.entries.at(-2).text, "正在核对组件之间的关系。");
+  assert.equal(process.entries.at(-3).text, "正在核对组件之间的关系。");
+  assert.equal(process.entries.at(-2).source, "retrieval");
   assert.equal(process.entries.at(-1).text, "方法分析已完成。");
 });
 

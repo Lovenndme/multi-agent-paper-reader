@@ -15,6 +15,7 @@ from core.agent_harness import (
     AgentRunContext,
     AgentSpec,
 )
+from core.agentic_types import AgenticRetrievalResult
 from core.agent_runtime import AgentRuntimeRequest, AgentRuntimeResult
 from core.analysis_progress import AnalysisProgressTracker
 from core.evidence import EvidenceSnippet
@@ -141,3 +142,44 @@ def test_harness_classifies_failure_and_updates_tracker() -> None:
     assert captured.value.category == "timeout"
     assert captured.value.failure_payload["summary"] == "方法失败"
     assert tracker.snapshot()["agents"]["method"]["status"] == "failed"
+
+
+def test_harness_appends_agent_selected_evidence_before_final_output() -> None:
+    runtime = RecordingRuntime()
+    snippets = [
+        EvidenceSnippet("E001", "Method", 0, 0, "seed method", "text"),
+        EvidenceSnippet("F001", "Architecture", 1, 1, "visual architecture", "figure"),
+    ]
+    agentic_spec = AgentSpec(
+        **{
+            **TEST_SPEC.__dict__,
+            "retrieval_goal": "Verify the architecture.",
+            "agentic_retrieval": True,
+        }
+    )
+
+    class FakeRetrievalRuntime:
+        def retrieve(self, _request):
+            return AgenticRetrievalResult(
+                snippets=tuple(snippets),
+                steps=(),
+                strategy="structured",
+                stop_reason="model_finished",
+            )
+
+    with (
+        patch("core.agent_harness.get_agentic_retrieval_runtime", return_value=FakeRetrievalRuntime()),
+        patch("core.evidence.semantic_scores", return_value=[0.9, 0.1]),
+    ):
+        result = AgentHarness(runtime).run(
+            agentic_spec,
+            AgentRunContext(
+                paper=ParsedPaper(title="Paper", full_text="paper"),
+                snippets=snippets,
+            ),
+        )
+
+    assert result.retrieval is not None
+    assert result.selected_evidence_ids == ("E001", "F001")
+    assert runtime.request is not None
+    assert "[F001 | figure" in runtime.request.messages[0].content

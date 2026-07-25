@@ -25,6 +25,18 @@ import { ModelCallTrace } from "./ModelCallTrace.jsx";
 
 const ChatMarkdown = lazy(() => import("./ChatMarkdown.jsx").then((module) => ({ default: module.ChatMarkdown })));
 const conversationTitleRefreshDelays = [1200, 4000, 9000, 18000];
+const retrievalProgressEvents = new Set([
+  "retrieval_started",
+  "query_planned",
+  "tool_started",
+  "tool_complete",
+  "evidence_selected",
+  "evidence_graded",
+  "query_refined",
+  "coverage_checked",
+  "repair_started",
+  "retrieval_complete",
+]);
 
 const focusOptions = [
   { value: "comprehensive", label: "综合" },
@@ -241,6 +253,9 @@ export function ComparisonWorkspace({
           setProgress(`${event.label} 已载入，正在对齐证据`);
         }
         if (event.type === "comparison_token") setProgress(`${modelLabel} 正在生成对比矩阵`);
+        if (retrievalProgressEvents.has(event.type) && event.summary) {
+          setProgress(event.summary);
+        }
         if (event.type === "complete") {
           setData(event);
           setComparisonId(event.comparison_id || "");
@@ -514,6 +529,13 @@ export function ComparisonWorkspace({
           answer += event.text || "";
           setChatMessages((previous) => previous.map((message) => (
             message.id === assistantId ? { ...message, content: answer } : message
+          )));
+        }
+        if (retrievalProgressEvents.has(event.type) && event.summary && !answer) {
+          setChatMessages((previous) => previous.map((message) => (
+            message.id === assistantId
+              ? { ...message, content: `_${event.summary}_` }
+              : message
           )));
         }
         if (event.type === "complete") complete = event;

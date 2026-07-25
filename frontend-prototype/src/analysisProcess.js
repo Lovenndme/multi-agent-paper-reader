@@ -1,4 +1,24 @@
-export const analysisAgentOrder = ["system", "method", "experiment", "critic", "summary"];
+export const analysisAgentOrder = [
+  "system",
+  "method",
+  "experiment",
+  "critic",
+  "evidence_supervisor",
+  "summary",
+];
+
+const retrievalEventTypes = new Set([
+  "retrieval_started",
+  "query_planned",
+  "tool_started",
+  "tool_complete",
+  "evidence_selected",
+  "evidence_graded",
+  "query_refined",
+  "coverage_checked",
+  "repair_started",
+  "retrieval_complete",
+]);
 
 export function emptyAnalysisProcess() {
   return {
@@ -71,6 +91,22 @@ export function applyAnalysisProcessEvent(current, event) {
         agent: event.agent || "system",
         text: event.text,
         source: event.source || "pipeline",
+        elapsed_ms: positiveNumber(event.elapsed_ms),
+      }),
+    };
+  }
+
+  if (retrievalEventTypes.has(event.type)) {
+    const text = event.text || event.summary;
+    return {
+      ...process,
+      status: "running",
+      duration_ms: positiveNumber(event.elapsed_ms || process.duration_ms),
+      entries: upsertEntry(process.entries, {
+        id: event.progress_id || `${event.type}-${event.step || 0}-${event.tool || "retrieval"}`,
+        agent: event.agent || "system",
+        text,
+        source: "retrieval",
         elapsed_ms: positiveNumber(event.elapsed_ms),
       }),
     };

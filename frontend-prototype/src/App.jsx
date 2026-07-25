@@ -125,6 +125,20 @@ const completeAgentStates = {
   summary: "complete",
 };
 
+const retrievalProgressEventTypes = [
+  "retrieval_started",
+  "query_planned",
+  "tool_started",
+  "tool_complete",
+  "evidence_selected",
+  "evidence_graded",
+  "query_refined",
+  "coverage_checked",
+  "repair_started",
+  "retrieval_complete",
+];
+const retrievalProgressEvents = new Set(retrievalProgressEventTypes);
+
 const defaultSettingsRouting = {
   text_provider: "zhipu",
   text_model: "glm-5.2",
@@ -668,6 +682,7 @@ function AnalysisProcessPanel({ process, expanded, onToggle }) {
     method: "方法 Agent",
     experiment: "实验 Agent",
     critic: "评审 Agent",
+    evidence_supervisor: "证据监督 Agent",
     summary: "总结 Agent",
   };
 
@@ -704,6 +719,8 @@ function AnalysisProcessPanel({ process, expanded, onToggle }) {
                           ? "模型过程摘要"
                           : entry.source === "tool_activity"
                             ? "工具活动"
+                            : entry.source === "retrieval"
+                              ? "证据检索"
                             : "处理进度"}
                         {entry.elapsed_ms ? ` · ${formatAnalysisDuration(entry.elapsed_ms)}` : ""}
                       </small>
@@ -2722,6 +2739,13 @@ export function App() {
             message.id === assistantId ? { ...message, content: answer } : message
           )));
         }
+        if (retrievalProgressEvents.has(event.type) && event.summary && !answer) {
+          setChatMessages((previous) => previous.map((message) => (
+            message.id === assistantId
+              ? { ...message, content: `_${event.summary}_` }
+              : message
+          )));
+        }
         if (event.type === "complete") {
           completed = true;
           completionEvent = event;
@@ -2788,10 +2812,11 @@ export function App() {
       method: "方法分析 Agent",
       experiment: "实验分析 Agent",
       critic: "批判性评审 Agent",
+      evidence_supervisor: "证据监督 Agent",
       summary: "总结 Agent",
     };
 
-    if (["analysis_started", "agent_started", "agent_progress", "agent_complete", "complete", "error"].includes(event.type)) {
+    if (["analysis_started", "agent_started", "agent_progress", "agent_complete", "complete", "error", ...retrievalProgressEventTypes].includes(event.type)) {
       setAnalysisProcess((previous) => applyAnalysisProcessEvent(previous, event));
     }
 
@@ -2844,6 +2869,11 @@ export function App() {
 
     if (event.type === "agent_progress") {
       if (event.text) setStreamMessage(event.text);
+      return "";
+    }
+
+    if (retrievalProgressEvents.has(event.type)) {
+      if (event.text || event.summary) setStreamMessage(event.text || event.summary);
       return "";
     }
 

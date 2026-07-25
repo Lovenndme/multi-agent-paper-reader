@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Literal
@@ -17,6 +17,10 @@ from typing import Any, Literal
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.agentic_runtime import (
+    AgenticRetrievalRequest,
+    get_agentic_retrieval_runtime,
+)
 from core.evidence import EvidenceSnippet
 from core.chat_memory import PromptMemory, get_prompt_memory
 from core.codex_tools import (
@@ -39,6 +43,7 @@ from core.model_providers import (
     text_provider_id,
 )
 from core.semantic_search import semantic_scores
+from core.paper_tools import PaperToolRegistry
 from utils.llm import (
     get_chat_llm_for_route,
     invoke_with_retry,
@@ -157,6 +162,9 @@ class PromptBuildStats:
     recalled_messages: int
     recalled_topics: int
     total_persisted_messages: int
+    agentic_retrieval_steps: int = 0
+    agentic_retrieval_strategy: str = "hybrid"
+    agentic_retrieval_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -313,7 +321,12 @@ def format_retrieved_evidence(snippets: list[EvidenceSnippet]) -> str:
     )
 
 
-def build_chat_prompt(request: PaperChatRequest) -> ChatPrompt:
+def build_chat_prompt(
+    request: PaperChatRequest,
+    *,
+    agentic: bool = False,
+    retrieval_emit: Callable[[str, dict[str, Any]], None] | None = None,
+) -> ChatPrompt:
     """Build a dynamically budgeted prompt with recent, indexed, and recalled memory."""
     session = get_analysis_session(request.analysis_id)
     analysis_context = session.context if session else request.context
@@ -332,6 +345,35 @@ def build_chat_prompt(request: PaperChatRequest) -> ChatPrompt:
         request.selected_text,
         recent_turns,
     )
+    retrieval_result = None
+    if agentic and session is not None and session.snippets:
+        provider_id, model, mode = resolve_chat_model_route(request)
+        planner_llm = get_chat_llm_for_route(provider_id, model, mode)
+        paper = analysis_context.get("paper") if isinstance(analysis_context, dict) else {}
+        paper_title = str(paper.get("title") or "") if isinstance(paper, dict) else ""
+        retrieval_result = get_agentic_retrieval_runtime().retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective=(
+                    "Retrieve the exact original-paper evidence needed to answer this "
+                    f"follow-up question: {request.question}"
+                )[:4_800],
+                registry=PaperToolRegistry.create(
+                    session.snippets,
+                    title=paper_title,
+                ),
+                seed_snippets=tuple(retrieved_evidence),
+                provider_id=provider_id,
+                llm=planner_llm,
+                retrieval_directive=(
+                    f"用户选中的片段：{request.selected_text}"
+                    if request.selected_text
+                    else None
+                ),
+                emit=retrieval_emit,
+            )
+        )
+        retrieved_evidence = list(retrieval_result.snippets)
     evidence_context = format_retrieved_evidence(retrieved_evidence)
     paper = analysis_context.get("paper") if isinstance(analysis_context, dict) else {}
     paper_title = str(paper.get("title") or "") if isinstance(paper, dict) else ""
@@ -461,6 +503,15 @@ def build_chat_prompt(request: PaperChatRequest) -> ChatPrompt:
             recalled_messages=len(prompt_memory.recalled_messages),
             recalled_topics=len(prompt_memory.recalled_topics),
             total_persisted_messages=prompt_memory.total_messages,
+            agentic_retrieval_steps=(
+                len(retrieval_result.steps) if retrieval_result else 0
+            ),
+            agentic_retrieval_strategy=(
+                retrieval_result.strategy if retrieval_result else "hybrid"
+            ),
+            agentic_retrieval_fallback=(
+                retrieval_result.fallback_used if retrieval_result else False
+            ),
         ),
     )
 

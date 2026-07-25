@@ -9,6 +9,8 @@
 ## 能做什么
 
 - **多 Agent 论文分析**：Method、Experiment、Critic 和 Summary Agent 协同生成研读笔记。
+- **全模型 Agentic RAG**：API 模型与 Codex 都能自主选择只读论文工具、补充检索并判断何时停止；原生工具调用不可用时自动回退到结构化动作协议。
+- **证据监督与修复**：Evidence Supervisor 在最终总结前检查证据覆盖，必要时仅对缺口 Agent 执行一次定向补检索。
 - **图表与公式理解**：识别正文、表格、公式、图注、位图和矢量图，并保留高分辨率导出能力。
 - **基于原文追问**：围绕当前论文连续提问，回答由章节、页码和证据片段约束。
 - **多论文对比**：选择 2～4 篇历史论文，对比方法、实验、结论和研究空白。
@@ -63,6 +65,7 @@ bash ./scripts/update.sh
 Codex 登录由官方 runtime 处理，网页不会读取、保存或返回 token。该功能只适用于通过 `localhost` 使用的本机单用户部署，不适用于公网多人服务。
 
 详细的模型目录、工具权限和安全边界见 [Codex 订阅接入说明](./docs/codex-subscription.md)。
+Agentic RAG 的工具、预算、回退、事件和评测方式见 [Agentic RAG 架构](./docs/agentic-rag.md)。
 
 ## 数据与隐私
 

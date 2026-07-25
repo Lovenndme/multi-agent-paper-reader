@@ -14,6 +14,7 @@ from agents.critic_agent import CRITIC_AGENT_SPEC
 from agents.experiment_agent import EXPERIMENT_AGENT_SPEC
 from agents.method_agent import METHOD_AGENT_SPEC
 from agents.summary_agent import SUMMARY_AGENT_SPEC
+from core.agentic_types import agentic_rag_mode, agentic_tool_strategy
 from core.agent_harness import AgentHarnessError, AgentRunContext
 from core.analysis_events import (
     AnalysisEvent,
@@ -36,6 +37,7 @@ from core.graph import GraphStageError, run_pipeline_with_state
 from core.history import save_paper_analysis
 from core.model_providers import (
     provider_label,
+    provider_agentic_capability,
     provider_spec,
     selected_text_model,
     selected_text_model_label,
@@ -100,6 +102,11 @@ def build_model_runtime_payload() -> dict[str, Any]:
         "vision_provider": visual_provider,
         "vision_provider_label": provider_label(visual_provider),
         "vision_model": selected_vision_model(),
+        "rag_mode": agentic_rag_mode(),
+        "agentic_tool_strategy": agentic_tool_strategy(),
+        "agentic_native_tool_calling": provider_agentic_capability(
+            text_provider
+        ).native_tool_calling,
     }
     if text_provider == "codex":
         payload["codex_security_profile"] = (
@@ -636,6 +643,17 @@ class PaperAnalysisOrchestrator:
             "critic_output": critic.model_dump(),
             "summary_output": summary.model_dump(),
             "assessment": assessment_payload,
+            "_agentic_rag": {
+                "mode": agentic_rag_mode(),
+                "strategy": agentic_tool_strategy(),
+                "supervisor": (
+                    final_state["evidence_supervisor"].model_dump()
+                    if hasattr(final_state.get("evidence_supervisor"), "model_dump")
+                    else final_state.get("evidence_supervisor")
+                ),
+                "repair_count": int(final_state.get("repair_count", 0)),
+                "retrieval_traces": list(final_state.get("retrieval_traces") or []),
+            },
         }
         yield from self._finalize(
             request=request,

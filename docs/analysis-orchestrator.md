@@ -13,6 +13,8 @@ FastAPI
       -> 证据索引
       -> LangGraph
           -> Harness(Method / Experiment / Critic)
+          -> Evidence Supervisor
+          -> optional one-round targeted repair
           -> Harness(Summary)
           -> Assessment
       -> 分析会话与历史持久化
@@ -39,13 +41,16 @@ FastAPI 仍负责 PDF 扩展名/空文件等 HTTP 边界校验，并将领域错
 ## 与 LangGraph、Harness、Runtime 的关系
 
 - Orchestrator 管理整篇论文是否完整完成；
-- LangGraph 表达专业 Agent 并行、Summary 汇合与 Assessment 的依赖关系；
-- Harness 管理单个 Agent 的证据、公开进度、输出校验和失败状态；
+- LangGraph 表达专业 Agent 并行、证据监督/一次修复、Summary 汇合与 Assessment
+  的依赖关系；
+- Harness 管理单个 Agent 的 seed evidence、Agentic 检索、公开进度、输出校验和
+  失败状态；
 - Runtime 管理单次模型调用、厂商适配、重试和工具上下文。
 
 Orchestrator 将同一个 `AgentRunContext` 传入 LangGraph。Method、Experiment、
-Critic 节点可并行运行，共享线程安全的 `AnalysisProgressTracker`，Summary 节点
-等待三个结构化结果后再执行。
+Critic 节点可并行运行，共享线程安全的 `AnalysisProgressTracker`。Evidence
+Supervisor 等待三个结构化结果，必要时只重跑存在缺口的 Agent 一次；Summary
+等待监督阶段结束后再执行。
 
 ## 任务阶段
 
@@ -58,7 +63,7 @@ preparing -> parsing -> vision -> evidence -> specialists
 
 公开事件继续兼容现有前端的 `analysis_started`、`agent_started`、
 `agent_progress`、`agent_complete`、`history_error`、`error` 和 `complete`
-协议。
+协议，并增加只含公开摘要的 retrieval/tool/coverage/repair 事件。
 
 ## 失败策略
 

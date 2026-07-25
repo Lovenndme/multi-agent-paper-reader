@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from langchain_core.messages import HumanMessage
 from core.agent_harness import AgentRunContext, AgentSpec, get_agent_harness
 from core.agent_runtime import AgentRuntimeCallbacks
 from core.comparison import ComparisonCreateRequest, ComparisonSource, format_comparison_sources
+from core.comparison import select_comparison_evidence
+from core.paper_tools import PaperToolRegistry, prefixed_snippets
 from core.schemas import ComparisonOutput
 
 
@@ -54,6 +57,11 @@ COMPARISON_AGENT_SPEC = AgentSpec(
     start_summary="已载入待比较论文及其证据，正在对齐研究问题、方法与实验结论。",
     complete_summary="多论文比较已完成，差异、共识与证据引用已整理。",
     failed_summary="多论文比较失败，无法生成可靠结果。",
+    retrieval_goal=(
+        "Retrieve balanced, source-separated evidence for every compared paper and the "
+        "requested comparison dimensions. Verify comparability conditions before synthesis."
+    ),
+    agentic_retrieval=True,
 )
 
 
@@ -63,6 +71,7 @@ def run_comparison_agent(
 ) -> ComparisonOutput:
     return get_agent_harness().run(
         COMPARISON_AGENT_SPEC,
+        _comparison_context(sources, request),
         input_data=ComparisonAgentInput(sources=sources, request=request),
     ).output
 
@@ -71,12 +80,53 @@ def stream_comparison_agent(
     sources: list[ComparisonSource],
     request: ComparisonCreateRequest,
     on_token: Callable[[str], None],
+    on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> ComparisonOutput:
     return get_agent_harness().run(
         COMPARISON_AGENT_SPEC,
-        AgentRunContext(
+        _comparison_context(
+            sources,
+            request,
             stream=True,
             callbacks=AgentRuntimeCallbacks(on_token=on_token),
+            emit=on_event,
         ),
         input_data=ComparisonAgentInput(sources=sources, request=request),
     ).output
+
+
+def _comparison_context(
+    sources: list[ComparisonSource],
+    request: ComparisonCreateRequest,
+    *,
+    stream: bool = False,
+    callbacks: AgentRuntimeCallbacks | None = None,
+    emit: Callable[[str, dict[str, Any]], None] | None = None,
+) -> AgentRunContext:
+    snippets = prefixed_snippets(
+        (source.label, source.snippets)
+        for source in sources
+    )
+    seed_ids = tuple(
+        f"{source.label}:{snippet.id}"
+        for source in sources
+        for snippet in select_comparison_evidence(
+            list(source.snippets),
+            request.focus,
+            request.custom_focus,
+            max_snippets=6,
+        )
+    )
+    focus = request.custom_focus if request.focus == "custom" else request.focus
+    return AgentRunContext(
+        snippets=snippets,
+        tool_registry=PaperToolRegistry.create(
+            snippets,
+            title=" / ".join(f"{source.label}: {source.title}" for source in sources),
+        ),
+        seed_evidence_ids=seed_ids,
+        retrieval_directive=f"本轮对比重点：{focus or 'comprehensive'}。",
+        stream=stream,
+        callbacks=callbacks or AgentRuntimeCallbacks(),
+        emit=emit,
+    )

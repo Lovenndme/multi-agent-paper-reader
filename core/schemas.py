@@ -90,6 +90,25 @@ class CriticOutput(BaseModel):
     )
 
 
+class EvidenceRepairTask(BaseModel):
+    """One targeted retrieval/analysis repair requested by the supervisor."""
+
+    agent: Literal["method", "experiment", "critic"]
+    missing_facets: List[str] = Field(default_factory=list, max_length=8)
+    suggested_queries: List[str] = Field(default_factory=list, max_length=6)
+    reason: str = Field(max_length=800)
+
+
+class EvidenceSupervisorOutput(BaseModel):
+    """Evidence coverage decision made before final synthesis."""
+
+    sufficient: bool
+    coverage_score: int = Field(ge=0, le=100)
+    summary: str = Field(max_length=1_200)
+    repair_tasks: List[EvidenceRepairTask] = Field(default_factory=list, max_length=3)
+    warnings: List[str] = Field(default_factory=list, max_length=8)
+
+
 class NoveltyAssessment(BaseModel):
     """Backend-calculated novelty result."""
 

@@ -5,14 +5,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any, Iterator, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.agentic_runtime import (
+    AgenticRetrievalRequest,
+    get_agentic_retrieval_runtime,
+)
 from core.chat import estimate_chat_tokens, trim_to_token_budget
 from core.comparison import load_comparison_sources, select_query_evidence
 from core.comparison_history import get_comparison_prompt_memory, load_comparison
+from core.paper_tools import PaperToolRegistry, prefixed_snippets
 from utils.llm import (
     get_chat_llm,
     invoke_with_retry,
@@ -44,6 +50,9 @@ class ComparisonChatStats:
     total_persisted_messages: int
     papers_retrieved: int
     evidence_snippets: int
+    agentic_retrieval_steps: int = 0
+    agentic_retrieval_strategy: str = "hybrid"
+    agentic_retrieval_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -52,7 +61,12 @@ class ComparisonChatPrompt:
     stats: ComparisonChatStats
 
 
-def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonChatPrompt:
+def build_comparison_chat_prompt(
+    request: ComparisonChatRequest,
+    *,
+    agentic: bool = False,
+    retrieval_emit: Callable[[str, dict[str, Any]], None] | None = None,
+) -> ComparisonChatPrompt:
     stored = load_comparison(request.comparison_id)
     if stored is None:
         raise KeyError("Comparison workspace was not found.")
@@ -63,9 +77,11 @@ def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonCh
 
     evidence_blocks: list[str] = []
     evidence_count = 0
+    seed_groups: list[tuple[str, list[Any]]] = []
     query = " ".join(part for part in (request.question, request.selected_text or "") if part)
     for source in sources:
         selected = select_query_evidence(list(source.snippets), query, max_snippets=6)
+        seed_groups.append((source.label, selected))
         evidence_count += len(selected)
         body = "\n\n".join(
             f"[{source.label}:{snippet.id} | {snippet.kind} | {snippet.section} | {snippet.page_label}]\n"
@@ -75,6 +91,55 @@ def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonCh
         evidence_blocks.append(
             f'<paper label="{source.label}" title="{source.title}">\n{body}\n</paper>'
         )
+    retrieval_result = None
+    if agentic:
+        all_snippets = prefixed_snippets(
+            (source.label, source.snippets)
+            for source in sources
+        )
+        seed_snippets = prefixed_snippets(seed_groups)
+        retrieval_result = get_agentic_retrieval_runtime().retrieve(
+            AgenticRetrievalRequest(
+                agent_id="comparison_chat",
+                objective=(
+                    "Retrieve balanced, paper-separated original evidence needed to answer "
+                    f"this cross-paper question: {request.question}"
+                )[:4_800],
+                registry=PaperToolRegistry.create(
+                    all_snippets,
+                    title=" / ".join(
+                        f"{source.label}: {source.title}" for source in sources
+                    ),
+                ),
+                seed_snippets=seed_snippets,
+                llm=get_chat_llm(),
+                retrieval_directive=(
+                    f"用户选中的对比片段：{request.selected_text}"
+                    if request.selected_text
+                    else None
+                ),
+                emit=retrieval_emit,
+            )
+        )
+        evidence_count = len(retrieval_result.snippets)
+        by_label = {
+            source.label: [
+                snippet
+                for snippet in retrieval_result.snippets
+                if snippet.id.startswith(f"{source.label}:")
+            ]
+            for source in sources
+        }
+        evidence_blocks = []
+        for source in sources:
+            body = "\n\n".join(
+                f"[{snippet.id} | {snippet.kind} | {snippet.section} | {snippet.page_label}]\n"
+                f"{snippet.text[:1_800]}"
+                for snippet in by_label[source.label]
+            ) or "未检索到相关原文证据。"
+            evidence_blocks.append(
+                f'<paper label="{source.label}" title="{source.title}">\n{body}\n</paper>'
+            )
 
     if request.conversation_id:
         memory = get_comparison_prompt_memory(request.conversation_id, query)
@@ -152,6 +217,15 @@ def build_comparison_chat_prompt(request: ComparisonChatRequest) -> ComparisonCh
             total_persisted_messages=total_messages,
             papers_retrieved=len(sources),
             evidence_snippets=evidence_count,
+            agentic_retrieval_steps=(
+                len(retrieval_result.steps) if retrieval_result else 0
+            ),
+            agentic_retrieval_strategy=(
+                retrieval_result.strategy if retrieval_result else "hybrid"
+            ),
+            agentic_retrieval_fallback=(
+                retrieval_result.fallback_used if retrieval_result else False
+            ),
         ),
     )
 

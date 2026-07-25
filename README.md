@@ -9,6 +9,8 @@ A local AI workspace for reading academic papers. Upload a PDF and the app combi
 ## What it does
 
 - **Multi-agent analysis** — Method, Experiment, Critic, and Summary agents collaborate on one paper.
+- **Agentic RAG on every text route** — API models and Codex can select bounded read-only paper tools, retrieve more evidence, and decide when to stop; unsupported native calls fall back to a structured-action protocol.
+- **Evidence supervision and repair** — an Evidence Supervisor checks coverage before synthesis and can request one targeted specialist repair round.
 - **Figures, tables, and formulas** — understands structured and visual PDF content while preserving high-resolution exports.
 - **Grounded paper chat** — follow-up answers are constrained by retrieved sections, pages, and evidence.
 - **Multi-paper comparison** — compare methods, experiments, conclusions, and research gaps across 2–4 saved papers.
@@ -63,6 +65,7 @@ The local app can use the current user's ChatGPT/Codex subscription without an O
 Authentication is handled by the official runtime. The web UI never reads, stores, or returns the Codex token. This route is designed only for a trusted single-user app accessed through `localhost`, not a public multi-user deployment.
 
 See [Codex subscription integration](./docs/codex-subscription.md) for the model catalog, tool permissions, and security boundaries.
+See [Agentic RAG architecture](./docs/agentic-rag.md) for tools, budgets, fallbacks, events, and evaluation.
 
 ## Data and privacy
 
