@@ -11,14 +11,17 @@ from utils.llm import (
     CodexChatModel,
     _messages_to_codex_prompt,
     get_api_key,
+    get_agentic_planner_llm_for_route,
     get_base_url,
     get_chat_llm,
     get_chat_llm_for_route,
     get_llm,
+    get_llm_for_route,
     get_vision_llm,
     invoke_vision_image_summary,
     is_vision_configured,
     parse_structured_output,
+    resolve_agentic_planner_route,
     start_text_model_call_trace,
     stream_structured_with_retry,
     update_text_model_call_trace,
@@ -61,9 +64,32 @@ class FakeNeedsRepairLLM:
 class TestStructuredOutputParsing(unittest.TestCase):
     def tearDown(self):
         get_llm.cache_clear()
+        get_llm_for_route.cache_clear()
         get_chat_llm.cache_clear()
         get_chat_llm_for_route.cache_clear()
+        get_agentic_planner_llm_for_route.cache_clear()
         get_vision_llm.cache_clear()
+
+    def test_agentic_planner_can_use_fast_mode_without_changing_final_route(self):
+        self.assertEqual(
+            resolve_agentic_planner_route(
+                "qwen",
+                "qwen3.7-max",
+                "thinking",
+                planner_mode="fast",
+            ),
+            ("qwen3.7-max", "fast"),
+        )
+        self.assertEqual(
+            resolve_agentic_planner_route(
+                "qwen",
+                "qwen3.7-max",
+                "thinking",
+                planner_model="unknown-model",
+                planner_mode="unknown-mode",
+            ),
+            ("qwen3.7-max", "thinking"),
+        )
 
     def test_chat_model_uses_separate_low_temperature(self):
         get_chat_llm.cache_clear()

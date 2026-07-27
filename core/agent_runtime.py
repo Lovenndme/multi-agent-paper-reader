@@ -13,7 +13,11 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
 from core.model_providers import selected_text_model, selected_text_mode, text_provider_id
-from utils.llm import invoke_structured_with_retry, stream_structured_with_retry
+from utils.llm import (
+    get_llm_for_route,
+    invoke_structured_with_retry,
+    stream_structured_with_retry,
+)
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -39,6 +43,9 @@ class AgentRuntimeRequest(Generic[SchemaT]):
     retries: int = 3
     delay: float = 2.0
     tool_context_path: str | Path | None = None
+    provider_id: str | None = None
+    model: str | None = None
+    mode: str | None = None
     callbacks: AgentRuntimeCallbacks = field(default_factory=AgentRuntimeCallbacks)
 
 
@@ -67,9 +74,18 @@ class StructuredOutputAgentRuntime:
 
     def execute(self, request: AgentRuntimeRequest[SchemaT]) -> AgentRuntimeResult[SchemaT]:
         started = time.monotonic()
-        provider = text_provider_id()
-        model = selected_text_model()
-        mode = selected_text_mode()
+        provider = request.provider_id or text_provider_id()
+        model = request.model or selected_text_model(provider)
+        mode = (
+            request.mode
+            if request.mode is not None
+            else selected_text_mode(provider, model)
+        )
+        frozen_route = any(
+            value is not None
+            for value in (request.provider_id, request.model, request.mode)
+        )
+        llm = get_llm_for_route(provider, model, mode) if frozen_route else None
 
         if request.stream:
             output = stream_structured_with_retry(
@@ -81,6 +97,7 @@ class StructuredOutputAgentRuntime:
                 retries=request.retries,
                 delay=request.delay,
                 tool_context_path=request.tool_context_path,
+                llm=llm,
             )
         else:
             output = invoke_structured_with_retry(
@@ -89,6 +106,7 @@ class StructuredOutputAgentRuntime:
                 retries=request.retries,
                 delay=request.delay,
                 tool_context_path=request.tool_context_path,
+                llm=llm,
             )
 
         return AgentRuntimeResult(

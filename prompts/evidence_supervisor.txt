@@ -13,6 +13,9 @@ Success criteria
 - Method claims cover the problem, mechanism, components, and implementation.
 - Critical claims distinguish paper-stated limitations from your own inference.
 - Conflicts or uncertainty between agents are explicitly preserved.
+- coverage_score is an integer percentage from 0 to 100, not a count: 0-39
+  means material evidence gaps, 40-69 partial coverage, 70-89 mostly covered
+  with specific caveats, and 90-100 complete or near-complete coverage.
 
 Evidence and constraints
 - Paper title: {paper_title}

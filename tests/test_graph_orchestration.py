@@ -11,7 +11,7 @@ from core.agent_harness import AgentRunContext
 from core.analysis_orchestrator import build_demo_outputs
 from core.analysis_progress import AnalysisProgressTracker
 from core.evidence import EvidenceSnippet
-from core.graph import evidence_node, run_pipeline_with_state
+from core.graph import evidence_node, run_pipeline_with_state, summary_node
 from core.pdf_parser import ParsedPaper, Section
 from core.schemas import (
     CriticOutput,
@@ -125,12 +125,14 @@ def test_graph_runs_one_targeted_repair_before_summary() -> None:
         "summary": SummaryOutput.model_validate(raw["summary_output"]),
     }
     calls: defaultdict[str, int] = defaultdict(int)
+    policies: defaultdict[str, list[str]] = defaultdict(list)
     lock = Lock()
 
     class RepairHarness:
         def run(self, spec, context=None, *, input_data=None):
             with lock:
                 calls[spec.agent_id] += 1
+                policies[spec.agent_id].append(context.retrieval_policy)
                 count = calls[spec.agent_id]
             if spec.agent_id == "method":
                 return SimpleNamespace(
@@ -172,3 +174,45 @@ def test_graph_runs_one_targeted_repair_before_summary() -> None:
     assert calls["summary"] == 1
     assert result["repair_count"] == 1
     assert result["evidence_supervisor"].sufficient is True
+    assert policies["method"] == ["skip", "force"]
+    assert policies["experiment"] == ["skip"]
+    assert policies["critic"] == ["skip"]
+    assert policies["summary"] == ["skip"]
+
+
+def test_summary_forces_one_adaptive_check_when_supervisor_keeps_warning() -> None:
+    paper = ParsedPaper(
+        title="Warning Paper",
+        full_text="method experiment limitation",
+        sections=[Section("Abstract", "method experiment limitation", 0, 0)],
+    )
+    snippets = [
+        EvidenceSnippet("E001", "Abstract", 0, 0, "method experiment limitation")
+    ]
+    raw = build_demo_outputs(paper, snippets)
+    expected = SummaryOutput.model_validate(raw["summary_output"])
+    observed: list[AgentRunContext] = []
+
+    class SummaryHarness:
+        def run(self, spec, context=None, *, input_data=None):
+            observed.append(context)
+            return SimpleNamespace(output=expected, retrieval=None)
+
+    state = {
+        "parsed_paper": paper,
+        "evidence_index": snippets,
+        "method_output": MethodOutput.model_validate(raw["method_output"]),
+        "experiment_output": ExperimentOutput.model_validate(raw["experiment_output"]),
+        "critic_output": CriticOutput.model_validate(raw["critic_output"]),
+        "evidence_supervisor": EvidenceSupervisorOutput(
+            sufficient=False,
+            coverage_score=67,
+            summary="仍有证据缺口。",
+            warnings=["实验数字缺少直接表格支持。"],
+        ),
+    }
+    with patch("core.graph.get_agent_harness", return_value=SummaryHarness()):
+        result = summary_node(state)
+
+    assert result["summary_output"] == expected
+    assert observed[0].retrieval_policy == "force"

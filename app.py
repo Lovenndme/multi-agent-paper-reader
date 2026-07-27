@@ -283,6 +283,7 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
     try:
         effective_request = request
         prompt = None
+        prompt_route: tuple[str, str, str] | None = None
         user_message: dict[str, Any] | None = None
         assistant_message: dict[str, Any] | None = None
         answer_chunks: list[str] = []
@@ -333,9 +334,22 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
                 for event in _drain_agent_events(retrieval_events):
                     yield event
                 prompt = prompt_future.result()
+            prompt_route = (
+                (
+                    prompt.provider_id,
+                    prompt.model,
+                    prompt.mode,
+                )
+                if all(
+                    hasattr(prompt, name)
+                    for name in ("provider_id", "model", "mode")
+                )
+                else resolve_chat_model_route(effective_request)
+            )
             for token in stream_chat_reply(
                 effective_request,
                 messages=prompt.messages,
+                route=prompt_route,
                 trace=model_trace,
             ):
                 answer_chunks.append(token)
@@ -343,7 +357,12 @@ def _stream_chat_response(request: PaperChatRequest, *, demo: bool) -> Iterable[
 
         visible_answer = hide_evidence_citations("".join(answer_chunks))
         if conversation_id and visible_answer:
-            memory_provider, memory_model, memory_mode = resolve_chat_model_route(effective_request)
+            if prompt_route is not None:
+                memory_provider, memory_model, memory_mode = prompt_route
+            else:
+                memory_provider, memory_model, memory_mode = resolve_chat_model_route(
+                    effective_request
+                )
             assistant_message = add_conversation_message(
                 conversation_id,
                 role="assistant",
@@ -531,6 +550,7 @@ def _stream_comparison_chat_response(
             for token in stream_comparison_chat_reply(
                 effective_request,
                 messages=prompt.messages,
+                route=(prompt.provider_id, prompt.model, prompt.mode),
                 trace=model_trace,
             ):
                 answer_chunks.append(token)

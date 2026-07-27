@@ -50,6 +50,13 @@ def test_critic_prompt_distinguishes_missing_evidence_from_missing_work():
     assert "is absent from the full paper" in text
 
 
+def test_evidence_supervisor_defines_percentage_score_rubric():
+    text = _prompt("evidence_supervisor.txt")
+    assert "integer percentage from 0 to 100" in text
+    assert "0-39" in text
+    assert "90-100" in text
+
+
 def test_comparison_prompt_preserves_prefixed_evidence_contract():
     text = _prompt("comparison.txt")
     assert "P1:E003" in text

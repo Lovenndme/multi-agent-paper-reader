@@ -11,8 +11,9 @@ from pydantic import BaseModel, Field, model_validator
 from core.evidence import EvidenceSnippet
 
 
-RagMode = Literal["hybrid", "agentic"]
+RagMode = Literal["hybrid", "adaptive", "agentic"]
 ToolStrategy = Literal["auto", "native", "structured"]
+RetrievalPolicy = Literal["skip", "auto", "force"]
 PaperToolName = Literal[
     "paper_search",
     "paper_overview",
@@ -109,6 +110,44 @@ class AgenticRunBudget:
 
 
 @dataclass(frozen=True)
+class AgenticRagConfig:
+    """Immutable Agentic RAG settings captured at one request boundary."""
+
+    mode: RagMode = "adaptive"
+    tool_strategy: ToolStrategy = "auto"
+    adaptive_max_steps: int = 2
+    adaptive_summary_max_steps: int = 1
+    adaptive_min_seed_items: int = 4
+    adaptive_min_seed_chars: int = 4_000
+    planner_model: str = ""
+    planner_mode: str = ""
+
+    @classmethod
+    def from_env(cls) -> "AgenticRagConfig":
+        return cls(
+            mode=agentic_rag_mode(),
+            tool_strategy=agentic_tool_strategy(),
+            adaptive_max_steps=adaptive_rag_max_steps(),
+            adaptive_summary_max_steps=adaptive_rag_max_steps(summary=True),
+            adaptive_min_seed_items=adaptive_rag_min_seed_items(),
+            adaptive_min_seed_chars=adaptive_rag_min_seed_chars(),
+            planner_model=os.environ.get(
+                "AGENTIC_RAG_PLANNER_MODEL",
+                "",
+            ).strip(),
+            planner_mode=os.environ.get(
+                "AGENTIC_RAG_PLANNER_MODE",
+                "",
+            ).strip().lower(),
+        )
+
+    def max_adaptive_steps(self, agent_id: str) -> int:
+        if agent_id.strip().lower() == "summary":
+            return self.adaptive_summary_max_steps
+        return self.adaptive_max_steps
+
+
+@dataclass(frozen=True)
 class ToolObservation:
     """Safe result returned by a paper tool."""
 
@@ -151,25 +190,52 @@ class AgenticRetrievalResult:
     strategy: str
     stop_reason: str
     fallback_used: bool = False
+    mode: RagMode | None = None
+    policy: RetrievalPolicy | None = None
+    adaptive_triggered: bool | None = None
+    adaptive_reason: str | None = None
 
     def public_trace(self) -> dict[str, Any]:
-        return {
+        payload = {
             "strategy": self.strategy,
             "stop_reason": self.stop_reason,
             "fallback_used": self.fallback_used,
             "evidence_ids": [snippet.id for snippet in self.snippets],
             "steps": [step.public_payload() for step in self.steps],
         }
+        if self.mode is not None:
+            payload["mode"] = self.mode
+        if self.policy is not None:
+            payload["policy"] = self.policy
+        if self.adaptive_triggered is not None:
+            payload["adaptive_triggered"] = self.adaptive_triggered
+            payload["adaptive_reason"] = self.adaptive_reason
+        return payload
 
 
 def agentic_rag_mode() -> RagMode:
-    value = os.environ.get("RAG_MODE", "agentic").strip().lower()
-    return "hybrid" if value == "hybrid" else "agentic"
+    value = os.environ.get("RAG_MODE", "adaptive").strip().lower()
+    return value if value in {"hybrid", "adaptive", "agentic"} else "adaptive"
 
 
 def agentic_tool_strategy() -> ToolStrategy:
     value = os.environ.get("AGENTIC_TOOL_STRATEGY", "auto").strip().lower()
     return value if value in {"auto", "native", "structured"} else "auto"
+
+
+def adaptive_rag_max_steps(*, summary: bool = False) -> int:
+    """Return the smaller planning budget used only by adaptive retrieval."""
+    if summary:
+        return _bounded_env_int("AGENTIC_RAG_ADAPTIVE_SUMMARY_MAX_STEPS", 1, 1, 2)
+    return _bounded_env_int("AGENTIC_RAG_ADAPTIVE_MAX_STEPS", 2, 1, 4)
+
+
+def adaptive_rag_min_seed_items() -> int:
+    return _bounded_env_int("AGENTIC_RAG_ADAPTIVE_MIN_SEED_ITEMS", 4, 1, 16)
+
+
+def adaptive_rag_min_seed_chars() -> int:
+    return _bounded_env_int("AGENTIC_RAG_ADAPTIVE_MIN_SEED_CHARS", 4_000, 500, 24_000)
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:

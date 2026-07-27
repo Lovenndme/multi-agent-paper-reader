@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -143,6 +144,53 @@ def test_run_consumes_the_same_event_pipeline() -> None:
     assert result.payload["mode"] == "live"
     assert result.payload["analysis_id"] == "analysis-1"
     assert result.payload["history_id"] == "history-1"
+
+
+def test_saved_text_route_metadata_uses_one_frozen_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RAG_MODE", "adaptive")
+    monkeypatch.setenv("AGENTIC_TOOL_STRATEGY", "structured")
+    orchestrator = _orchestrator(
+        provider_id=lambda: "qwen",
+        runtime_payload_builder=lambda: {
+            "text_provider": "codex",
+            "text_provider_label": "stale provider",
+            "text_model": "stale-model",
+            "text_model_label": "stale model",
+            "text_mode": "stale",
+            "agentic_native_tool_calling": False,
+            "codex_security_profile": {"sandbox": "stale"},
+        },
+    )
+
+    with (
+        patch(
+            "core.analysis_orchestrator.selected_text_model",
+            return_value="qwen3.7-max",
+        ),
+        patch(
+            "core.analysis_orchestrator.selected_text_mode",
+            return_value="thinking",
+        ),
+    ):
+        result = orchestrator.run(
+            AnalysisRequest(
+                filename="paper.pdf",
+                pdf_data=b"%PDF-1.7 orchestrator",
+            )
+        )
+
+    config = result.payload["model_config"]
+    assert config["text_provider"] == "qwen"
+    assert config["text_provider_label"] == "Qwen"
+    assert config["text_model"] == "qwen3.7-max"
+    assert config["text_model_label"] == "Qwen3.7 Max"
+    assert config["text_mode"] == "thinking"
+    assert config["rag_mode"] == "adaptive"
+    assert config["agentic_tool_strategy"] == "structured"
+    assert config["agentic_native_tool_calling"] is True
+    assert "codex_security_profile" not in config
 
 
 def test_parse_failure_becomes_typed_error_event_and_exception() -> None:

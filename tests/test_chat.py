@@ -184,7 +184,7 @@ class TestPaperChat(unittest.TestCase):
         analysis_id = store_analysis_session(snippets, {"paper": {"title": "Semantic"}})
 
         with patch(
-            "core.chat.semantic_scores",
+            "core.hybrid_retrieval.semantic_scores",
             side_effect=[[0.05, 0.92], [0.10, 0.90]],
         ) as ranker:
             retrieved = retrieve_chat_evidence(
@@ -196,7 +196,7 @@ class TestPaperChat(unittest.TestCase):
             )
 
         self.assertEqual(retrieved[0].id, "E002")
-        self.assertEqual(ranker.call_count, 2)
+        self.assertEqual(ranker.call_count, 1)
 
     def test_agent_citations_bridge_translated_summary_back_to_source(self):
         snippets = [

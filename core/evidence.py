@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from core.pdf_parser import FigureBlock, ParsedPaper, Section, TableBlock, _normalize_title
-from core.semantic_search import semantic_scores
 
 
 @dataclass(frozen=True)
@@ -196,38 +195,19 @@ def select_evidence_snippets(
     max_chars: int,
     max_snippets: int,
 ) -> list[EvidenceSnippet]:
-    """Rank snippets semantically, with lexical scoring only as a safe fallback."""
-    terms = AGENT_TERMS.get(agent_type, set())
-    documents = [f"{snippet.section}\n{snippet.text}" for snippet in snippets]
-    similarities = semantic_scores(
-        AGENT_SEMANTIC_QUERIES.get(agent_type, agent_type),
-        documents,
-    )
-    scored: list[tuple[float, int, EvidenceSnippet]] = []
-    for index, snippet in enumerate(snippets):
-        if similarities is None:
-            haystack = f"{_normalize_title(snippet.section)} {snippet.text[:900].lower()}"
-            score = float(sum(1 for term in terms if term in haystack))
-            if "abstract" in haystack:
-                score += 1
-        else:
-            score = similarities[index] * 20.0
-        if agent_type == "experiment" and snippet.kind == "table":
-            score += 7
-        if agent_type == "method" and snippet.kind == "figure":
-            score += 3
-        if agent_type == "critic" and snippet.kind in {"table", "figure"}:
-            score += 2
-        if snippet.id.startswith(("T", "F")) and snippet.text:
-            score += 1
-        scored.append((score, index, snippet))
+    """Rank role evidence through the same hierarchical hybrid retrieval core."""
+    from core.hybrid_retrieval import rank_evidence
 
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    ranking = rank_evidence(
+        snippets,
+        AGENT_SEMANTIC_QUERIES.get(agent_type, agent_type),
+        profile=agent_type,
+        rerank=False,
+    )
     chosen: list[EvidenceSnippet] = []
     total_chars = 0
-    for score, _, snippet in scored:
-        if similarities is None and score <= 0 and chosen:
-            continue
+    for hit in ranking.hits:
+        snippet = hit.snippet
         next_size = len(snippet.text)
         if chosen and total_chars + next_size > max_chars:
             continue
@@ -260,6 +240,8 @@ def _chunk_text(text: str, chunk_chars: int, overlap_chars: int) -> Iterable[str
 
 
 def _compact_text(text: str) -> str:
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"(?<=[A-Za-z])-[ \t]*\n[ \t]*(?=[a-z])", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()

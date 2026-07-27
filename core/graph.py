@@ -88,7 +88,7 @@ def _run_context(state: PaperState) -> AgentRunContext:
 def method_node(state: PaperState) -> dict:
     result = get_agent_harness().run(
         METHOD_AGENT_SPEC,
-        _run_context(state),
+        replace(_run_context(state), retrieval_policy="skip"),
     )
     return _agent_result_update("method_output", result)
 
@@ -96,7 +96,7 @@ def method_node(state: PaperState) -> dict:
 def experiment_node(state: PaperState) -> dict:
     result = get_agent_harness().run(
         EXPERIMENT_AGENT_SPEC,
-        _run_context(state),
+        replace(_run_context(state), retrieval_policy="skip"),
     )
     return _agent_result_update("experiment_output", result)
 
@@ -104,7 +104,7 @@ def experiment_node(state: PaperState) -> dict:
 def critic_node(state: PaperState) -> dict:
     result = get_agent_harness().run(
         CRITIC_AGENT_SPEC,
-        _run_context(state),
+        replace(_run_context(state), retrieval_policy="skip"),
     )
     return _agent_result_update("critic_output", result)
 
@@ -173,6 +173,7 @@ def repair_node(state: PaperState) -> dict:
             context,
             retrieval_directive=directive,
             seed_evidence_ids=tuple(seed_ids),
+            retrieval_policy="force",
         )
         result = get_agent_harness().run(spec, task_context)
         return output_key, result
@@ -204,6 +205,12 @@ def repair_node(state: PaperState) -> dict:
 
 def summary_node(state: PaperState) -> dict:
     paper = state["parsed_paper"]
+    supervisor = state["evidence_supervisor"]
+    summary_policy = (
+        "force"
+        if not supervisor.sufficient or supervisor.warnings
+        else "skip"
+    )
     seed_ids = tuple(
         dict.fromkeys(
             [
@@ -219,6 +226,7 @@ def summary_node(state: PaperState) -> dict:
             _run_context(state),
             seed_evidence_ids=seed_ids,
             retrieval_directive=_summary_retrieval_directive(state),
+            retrieval_policy=summary_policy,
         ),
         input_data=SummaryAgentInput(
             paper_title=paper.title,
@@ -300,11 +308,12 @@ def run_pipeline_with_state(
 ) -> PaperState:
     """Run the full pipeline and return intermediate agent outputs too."""
     app = build_graph()
-    initial_state: PaperState = {"parsed_paper": parsed_paper}
+    initial_state: PaperState = {
+        "parsed_paper": parsed_paper,
+        "agent_context": agent_context or AgentRunContext(),
+    }
     if evidence_index is not None:
         initial_state["evidence_index"] = evidence_index
-    if agent_context is not None:
-        initial_state["agent_context"] = agent_context
     final_state = app.invoke(initial_state)
     return final_state
 

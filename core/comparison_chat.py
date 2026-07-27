@@ -15,12 +15,18 @@ from core.agentic_runtime import (
     AgenticRetrievalRequest,
     get_agentic_retrieval_runtime,
 )
+from core.agentic_types import AgenticRagConfig, AgenticRunBudget
 from core.chat import estimate_chat_tokens, trim_to_token_budget
 from core.comparison import load_comparison_sources, select_query_evidence
 from core.comparison_history import get_comparison_prompt_memory, load_comparison
+from core.model_providers import (
+    selected_text_model,
+    selected_text_mode,
+    text_provider_id,
+)
 from core.paper_tools import PaperToolRegistry, prefixed_snippets
 from utils.llm import (
-    get_chat_llm,
+    get_chat_llm_for_route,
     invoke_with_retry,
     start_text_model_call_trace,
     update_text_model_call_trace,
@@ -53,12 +59,17 @@ class ComparisonChatStats:
     agentic_retrieval_steps: int = 0
     agentic_retrieval_strategy: str = "hybrid"
     agentic_retrieval_fallback: bool = False
+    adaptive_retrieval_triggered: bool | None = None
+    adaptive_retrieval_reason: str | None = None
 
 
 @dataclass(frozen=True)
 class ComparisonChatPrompt:
     messages: tuple[BaseMessage, ...]
     stats: ComparisonChatStats
+    provider_id: str
+    model: str
+    mode: str
 
 
 def build_comparison_chat_prompt(
@@ -67,6 +78,9 @@ def build_comparison_chat_prompt(
     agentic: bool = False,
     retrieval_emit: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> ComparisonChatPrompt:
+    provider_id = text_provider_id()
+    model = selected_text_model(provider_id)
+    model_mode = selected_text_mode(provider_id, model)
     stored = load_comparison(request.comparison_id)
     if stored is None:
         raise KeyError("Comparison workspace was not found.")
@@ -112,7 +126,12 @@ def build_comparison_chat_prompt(
                     ),
                 ),
                 seed_snippets=seed_snippets,
-                llm=get_chat_llm(),
+                budget=AgenticRunBudget.from_env(),
+                config=AgenticRagConfig.from_env(),
+                provider_id=provider_id,
+                model=model,
+                model_mode=model_mode,
+                adaptive_query=query,
                 retrieval_directive=(
                     f"用户选中的对比片段：{request.selected_text}"
                     if request.selected_text
@@ -226,7 +245,16 @@ def build_comparison_chat_prompt(
             agentic_retrieval_fallback=(
                 retrieval_result.fallback_used if retrieval_result else False
             ),
+            adaptive_retrieval_triggered=(
+                retrieval_result.adaptive_triggered if retrieval_result else None
+            ),
+            adaptive_retrieval_reason=(
+                retrieval_result.adaptive_reason if retrieval_result else None
+            ),
         ),
+        provider_id=provider_id,
+        model=model,
+        mode=model_mode,
     )
 
 
@@ -234,13 +262,29 @@ def stream_comparison_chat_reply(
     request: ComparisonChatRequest,
     *,
     messages: tuple[BaseMessage, ...] | list[BaseMessage] | None = None,
+    route: tuple[str, str, str] | None = None,
     trace: dict[str, Any] | None = None,
 ) -> Iterator[str]:
-    model_messages = list(messages) if messages is not None else list(build_comparison_chat_prompt(request).messages)
-    llm = get_chat_llm()
+    if messages is None:
+        prompt = build_comparison_chat_prompt(request)
+        model_messages = list(prompt.messages)
+        effective_route = (prompt.provider_id, prompt.model, prompt.mode)
+    else:
+        model_messages = list(messages)
+        effective_route = route
+        if effective_route is None:
+            provider_id = text_provider_id()
+            model = selected_text_model(provider_id)
+            effective_route = (
+                provider_id,
+                model,
+                selected_text_mode(provider_id, model),
+            )
+    provider_id, model, model_mode = effective_route
+    llm = get_chat_llm_for_route(provider_id, model, model_mode)
     runtime_trace = trace if trace is not None else {}
     runtime_trace.clear()
-    runtime_trace.update(start_text_model_call_trace(llm))
+    runtime_trace.update(start_text_model_call_trace(llm, provider_id))
     emitted = False
     try:
         for chunk in llm.stream(model_messages):

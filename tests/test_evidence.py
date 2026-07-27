@@ -75,7 +75,10 @@ class TestEvidenceIndex(unittest.TestCase):
         scores = [0.01] * len(snippets)
         scores[target_index] = 0.99
 
-        with patch("core.evidence.semantic_scores", return_value=scores):
+        with (
+            patch("core.hybrid_retrieval.semantic_scores", return_value=scores),
+            patch("core.hybrid_retrieval.bm25_scores", return_value=scores),
+        ):
             context = evidence_context_for_agent(
                 snippets,
                 "method",

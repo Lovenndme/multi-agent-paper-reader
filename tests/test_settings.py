@@ -50,7 +50,14 @@ class TestApplicationSettings(unittest.TestCase):
     def test_public_payload_never_contains_secret_material(self):
         with patch.dict(
             os.environ,
-            {"TEXT_PROVIDER": "zhipu", "GLM_API_KEY": "secret-test-value"},
+            {
+                "TEXT_PROVIDER": "zhipu",
+                "GLM_API_KEY": "secret-test-value",
+                "RAG_MODE": "adaptive",
+                "AGENTIC_RAG_ADAPTIVE_MAX_STEPS": "2",
+                "AGENTIC_RAG_ADAPTIVE_SUMMARY_MAX_STEPS": "1",
+                "AGENTIC_RAG_PLANNER_MODE": "fast",
+            },
             clear=False,
         ):
             payload = application_settings_payload()
@@ -73,6 +80,10 @@ class TestApplicationSettings(unittest.TestCase):
             },
         )
         self.assertNotIn("secret-test-value", repr(payload))
+        self.assertEqual(payload["agentic_rag"]["mode"], "adaptive")
+        self.assertEqual(payload["agentic_rag"]["adaptive_max_steps"], 2)
+        self.assertEqual(payload["agentic_rag"]["adaptive_summary_max_steps"], 1)
+        self.assertEqual(payload["agentic_rag"]["planner_mode"], "fast")
 
     def test_codex_payload_uses_live_models_without_account_identity(self):
         model = CodexModelInfo(

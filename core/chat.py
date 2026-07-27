@@ -21,7 +21,9 @@ from core.agentic_runtime import (
     AgenticRetrievalRequest,
     get_agentic_retrieval_runtime,
 )
+from core.agentic_types import AgenticRagConfig, AgenticRunBudget
 from core.evidence import EvidenceSnippet
+from core.hybrid_retrieval import rank_evidence
 from core.chat_memory import PromptMemory, get_prompt_memory
 from core.codex_tools import (
     create_codex_tool_context,
@@ -42,7 +44,6 @@ from core.model_providers import (
     selected_text_model,
     text_provider_id,
 )
-from core.semantic_search import semantic_scores
 from core.paper_tools import PaperToolRegistry
 from utils.llm import (
     get_chat_llm_for_route,
@@ -165,12 +166,17 @@ class PromptBuildStats:
     agentic_retrieval_steps: int = 0
     agentic_retrieval_strategy: str = "hybrid"
     agentic_retrieval_fallback: bool = False
+    adaptive_retrieval_triggered: bool | None = None
+    adaptive_retrieval_reason: str | None = None
 
 
 @dataclass(frozen=True)
 class ChatPrompt:
     messages: tuple[BaseMessage, ...]
     stats: PromptBuildStats
+    provider_id: str
+    model: str
+    mode: str
 
 
 def store_analysis_session(
@@ -230,57 +236,34 @@ def retrieve_chat_evidence(
     query = " ".join(part for part in (question, selected_text or "", recent_user_text) if part)
     terms = _query_terms(query)
     intents = _query_intents(query)
-    explicit_ids = {match.upper() for match in re.findall(r"\b[ETF]\d{3}\b", query, re.I)}
     linked_ids = _linked_evidence_ids(session.context, terms, intents)
-    query_lower = query.lower()
-    documents = [f"{snippet.section}\n{snippet.text}" for snippet in session.snippets]
-    similarities = semantic_scores(query, documents)
-    if similarities is not None:
-        title_similarities = semantic_scores(
+    expanded_query = " ".join(
+        (
             query,
-            [snippet.section for snippet in session.snippets],
-        )
-        if title_similarities is not None:
-            similarities = [
-                content_score * 0.85 + title_score * 0.15
-                for content_score, title_score in zip(
-                    similarities,
-                    title_similarities,
-                    strict=True,
+            *(
+                term
+                for intent in sorted(intents)
+                for term in (
+                    *QUERY_EXPANSION_TERMS[intent],
+                    *QUERY_EXPANSIONS[intent],
                 )
-            ]
-    scored: list[tuple[float, int, EvidenceSnippet]] = []
-
-    for index, snippet in enumerate(session.snippets):
-        section = snippet.section.lower()
-        text = snippet.text.lower()
-        score = similarities[index] * 20.0 if similarities is not None else 0.0
-        if snippet.id.upper() in explicit_ids:
-            score += 100
-        score += linked_ids.get(snippet.id.upper(), 0)
-        if similarities is None:
-            for term in terms:
-                if term in section:
-                    score += 5
-                occurrences = text.count(term)
-                score += min(occurrences, 4) * 1.5
-        intent_score = _intent_relevance(snippet, intents)
-        score += intent_score if similarities is None else 0.0
-        if ("abstract" in section or "摘要" in section) and not intents:
-            score += 0.8
-        if snippet.kind == "table" and any(word in query_lower for word in ("表", "table", "结果", "result", "数字")):
-            score += 6
-        if snippet.kind == "figure" and any(word in query_lower for word in ("图", "figure", "chart", "架构")):
-            score += 6
-        scored.append((score, -index, snippet))
-
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            ),
+        )
+    )
+    ranking = rank_evidence(session.snippets, expanded_query)
+    ranked = list(ranking.hits)
+    if linked_ids:
+        ranked.sort(
+            key=lambda hit: (
+                -linked_ids.get(hit.snippet.id.upper(), 0),
+                -hit.score,
+            )
+        )
     selected: list[EvidenceSnippet] = []
     total_chars = 0
     per_section: dict[str, int] = {}
-    for score, _, snippet in scored:
-        if similarities is None and score <= 0:
-            continue
+    for hit in ranked:
+        snippet = hit.snippet
         section_key = snippet.section.lower()
         if per_section.get(section_key, 0) >= 3:
             continue
@@ -328,6 +311,7 @@ def build_chat_prompt(
     retrieval_emit: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> ChatPrompt:
     """Build a dynamically budgeted prompt with recent, indexed, and recalled memory."""
+    provider_id, model, mode = resolve_chat_model_route(request)
     session = get_analysis_session(request.analysis_id)
     analysis_context = session.context if session else request.context
     prompt_memory = _load_prompt_memory(request)
@@ -347,8 +331,6 @@ def build_chat_prompt(
     )
     retrieval_result = None
     if agentic and session is not None and session.snippets:
-        provider_id, model, mode = resolve_chat_model_route(request)
-        planner_llm = get_chat_llm_for_route(provider_id, model, mode)
         paper = analysis_context.get("paper") if isinstance(analysis_context, dict) else {}
         paper_title = str(paper.get("title") or "") if isinstance(paper, dict) else ""
         retrieval_result = get_agentic_retrieval_runtime().retrieve(
@@ -363,8 +345,16 @@ def build_chat_prompt(
                     title=paper_title,
                 ),
                 seed_snippets=tuple(retrieved_evidence),
+                budget=AgenticRunBudget.from_env(),
+                config=AgenticRagConfig.from_env(),
                 provider_id=provider_id,
-                llm=planner_llm,
+                model=model,
+                model_mode=mode,
+                adaptive_query=" ".join(
+                    part
+                    for part in (request.question, request.selected_text or "")
+                    if part
+                ),
                 retrieval_directive=(
                     f"用户选中的片段：{request.selected_text}"
                     if request.selected_text
@@ -512,7 +502,16 @@ def build_chat_prompt(
             agentic_retrieval_fallback=(
                 retrieval_result.fallback_used if retrieval_result else False
             ),
+            adaptive_retrieval_triggered=(
+                retrieval_result.adaptive_triggered if retrieval_result else None
+            ),
+            adaptive_retrieval_reason=(
+                retrieval_result.adaptive_reason if retrieval_result else None
+            ),
         ),
+        provider_id=provider_id,
+        model=model,
+        mode=mode,
     )
 
 
@@ -720,12 +719,14 @@ def hide_evidence_citations(text: str) -> str:
 def resolve_chat_model_route(request: PaperChatRequest) -> tuple[str, str, str]:
     """Resolve a request-scoped chat route without changing global Settings."""
     global_provider = text_provider_id()
+    global_model = selected_text_model(global_provider)
+    global_mode = selected_text_mode(global_provider, global_model)
     provider_id = (request.text_provider or global_provider).strip()
     spec = provider_spec(provider_id)
     model = (request.text_model or "").strip()
     if not model:
         if provider_id == global_provider:
-            model = selected_text_model()
+            model = global_model
         elif spec.credential_type == "codex_login":
             catalog = codex_model_catalog()
             recommended = next((item.id for item in catalog if item.recommended), None)
@@ -737,8 +738,8 @@ def resolve_chat_model_route(request: PaperChatRequest) -> tuple[str, str, str]:
     requested_mode = (request.text_mode or "").strip().lower()
     if requested_mode:
         mode = requested_mode
-    elif provider_id == global_provider and model == selected_text_model():
-        mode = selected_text_mode()
+    elif provider_id == global_provider and model == global_model:
+        mode = global_mode
     else:
         mode = available_modes[0].id if available_modes else ""
     return provider_id, model, mode
@@ -748,11 +749,18 @@ def stream_chat_reply(
     request: PaperChatRequest,
     *,
     messages: list[BaseMessage] | tuple[BaseMessage, ...] | None = None,
+    route: tuple[str, str, str] | None = None,
     trace: dict[str, Any] | None = None,
 ) -> Iterator[str]:
     """Stream an answer, falling back to one non-streaming call if needed."""
-    model_messages = list(messages) if messages is not None else build_chat_messages(request)
-    provider_id, model, mode = resolve_chat_model_route(request)
+    if messages is None:
+        prompt = build_chat_prompt(request)
+        model_messages = list(prompt.messages)
+        effective_route = (prompt.provider_id, prompt.model, prompt.mode)
+    else:
+        model_messages = list(messages)
+        effective_route = route or resolve_chat_model_route(request)
+    provider_id, model, mode = effective_route
     llm = get_chat_llm_for_route(provider_id, model, mode)
     tool_context = None
     if provider_id == "codex":

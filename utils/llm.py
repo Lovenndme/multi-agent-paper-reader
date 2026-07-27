@@ -197,6 +197,43 @@ def get_llm():
     )
 
 
+@lru_cache(maxsize=32)
+def get_llm_for_route(provider_id: str, model: str, mode: str = ""):
+    """Build the normal structured-agent client for one frozen route."""
+    spec = provider_spec(provider_id)
+    if provider_id == "codex":
+        if not provider_credential_configured(provider_id):
+            raise EnvironmentError(_missing_key_message(provider_id))
+        if not model_is_known(provider_id, "text", model):
+            raise ValueError(f"{spec.label} 不支持文本模型 {model}。")
+        available_modes = model_modes(provider_id, model)
+        if mode and not any(item.id == mode for item in available_modes):
+            raise ValueError(f"{model} 不支持响应模式 {mode}。")
+        effective_mode = mode or (available_modes[0].id if available_modes else "")
+        return CodexChatModel(model, effective_mode)
+
+    api_key = get_api_key(provider_id)
+    if not api_key:
+        raise EnvironmentError(_missing_key_message(provider_id))
+    if not model_is_known(provider_id, "text", model):
+        raise ValueError(f"{spec.label} 不支持文本模型 {model}。")
+    available_modes = model_modes(provider_id, model)
+    if mode and not any(item.id == mode for item in available_modes):
+        raise ValueError(f"{model} 不支持响应模式 {mode}。")
+    effective_mode = mode or (available_modes[0].id if available_modes else "")
+    return _build_chat_model(
+        **_client_kwargs(
+            provider_id=provider_id,
+            model=model,
+            api_key=api_key,
+            temperature=_DEFAULT_TEMPERATURE,
+            timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "240")),
+            max_retries=3,
+            mode=effective_mode,
+        )
+    )
+
+
 @lru_cache(maxsize=1)
 def get_chat_llm():
     """Return the same text model with a lower temperature for grounded paper QA."""
@@ -254,6 +291,50 @@ def get_chat_llm_for_route(provider_id: str, model: str, mode: str = ""):
             mode=effective_mode,
         )
     )
+
+
+def resolve_agentic_planner_route(
+    provider_id: str,
+    model: str,
+    mode: str = "",
+    *,
+    planner_model: str = "",
+    planner_mode: str = "",
+) -> tuple[str, str]:
+    """Resolve an optional cheaper planner route within the same provider."""
+    candidate_model = planner_model.strip() or model
+    if not model_is_known(provider_id, "text", candidate_model):
+        candidate_model = model
+
+    available_modes = model_modes(provider_id, candidate_model)
+    mode_ids = {item.id for item in available_modes}
+    candidate_mode = planner_mode.strip().lower()
+    if not candidate_mode and candidate_model == model:
+        candidate_mode = mode
+    if candidate_mode not in mode_ids:
+        candidate_mode = mode if mode in mode_ids else ""
+    if not candidate_mode and available_modes:
+        candidate_mode = available_modes[0].id
+    return candidate_model, candidate_mode
+
+
+@lru_cache(maxsize=64)
+def get_agentic_planner_llm_for_route(
+    provider_id: str,
+    model: str,
+    mode: str = "",
+    planner_model: str = "",
+    planner_mode: str = "",
+):
+    """Build the request-scoped model used only for retrieval planning."""
+    effective_model, effective_mode = resolve_agentic_planner_route(
+        provider_id,
+        model,
+        mode,
+        planner_model=planner_model,
+        planner_mode=planner_mode,
+    )
+    return get_chat_llm_for_route(provider_id, effective_model, effective_mode)
 
 
 @lru_cache(maxsize=1)
@@ -354,8 +435,10 @@ def _missing_key_message(provider_id: str) -> str:
 def reset_llm_clients() -> None:
     """Discard cached clients after runtime credentials change."""
     get_llm.cache_clear()
+    get_llm_for_route.cache_clear()
     get_chat_llm.cache_clear()
     get_chat_llm_for_route.cache_clear()
+    get_agentic_planner_llm_for_route.cache_clear()
     get_vision_llm.cache_clear()
 
 
@@ -629,9 +712,10 @@ def invoke_structured_with_retry(
     retries: int = 3,
     delay: float = 2.0,
     tool_context_path: str | Path | None = None,
+    llm: Any | None = None,
 ) -> SchemaT:
     """Invoke an LLM with structured output and fallback for compatible providers."""
-    llm = _with_codex_tool_context(get_llm(), tool_context_path)
+    llm = _with_codex_tool_context(llm or get_llm(), tool_context_path)
     try:
         structured_llm = llm.with_structured_output(schema)
         return invoke_with_retry(structured_llm, messages, retries=retries, delay=delay)
@@ -661,6 +745,7 @@ def stream_structured_with_retry(
     retries: int = 1,
     delay: float = 2.0,
     tool_context_path: str | Path | None = None,
+    llm: Any | None = None,
 ) -> SchemaT:
     """Stream raw JSON tokens, then parse the accumulated output into a schema.
 
@@ -673,16 +758,16 @@ def stream_structured_with_retry(
     for attempt in range(retries):
         chunks: list[str] = []
         try:
-            llm = _with_codex_tool_context(get_llm(), tool_context_path)
-            if isinstance(llm, CodexChatModel):
-                return llm.stream_structured(
+            active_llm = _with_codex_tool_context(llm or get_llm(), tool_context_path)
+            if isinstance(active_llm, CodexChatModel):
+                return active_llm.stream_structured(
                     schema,
                     messages,
                     on_token,
                     on_progress,
                     on_activity,
                 )
-            for chunk in llm.stream(_messages_with_json_schema(messages, schema)):
+            for chunk in active_llm.stream(_messages_with_json_schema(messages, schema)):
                 token = _content_to_text(getattr(chunk, "content", chunk))
                 if not token:
                     continue
@@ -707,6 +792,7 @@ def stream_structured_with_retry(
                 retries=2,
                 delay=delay,
                 tool_context_path=tool_context_path,
+                llm=llm,
             )
         except Exception as repair_exc:  # noqa: BLE001 - preserve both failure modes
             _write_llm_diagnostic(schema, "repair_error", repair_exc, last_text)

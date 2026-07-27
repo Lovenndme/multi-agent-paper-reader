@@ -126,6 +126,7 @@ def _comparison_context(
         ),
         seed_evidence_ids=seed_ids,
         retrieval_directive=f"本轮对比重点：{focus or 'comprehensive'}。",
+        retrieval_policy="force",
         stream=stream,
         callbacks=callbacks or AgentRuntimeCallbacks(),
         emit=emit,

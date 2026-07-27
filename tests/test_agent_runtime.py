@@ -82,3 +82,39 @@ def test_runtime_routes_stream_callbacks() -> None:
     assert stream.call_args.kwargs["on_progress"] is callbacks.on_progress
     assert stream.call_args.kwargs["on_activity"] is callbacks.on_activity
     assert stream.call_args.kwargs["retries"] == 2
+
+
+def test_runtime_uses_frozen_route_for_client_and_metadata() -> None:
+    expected = RuntimeOutput(answer="frozen")
+    frozen_llm = object()
+    with (
+        patch(
+            "core.agent_runtime.get_llm_for_route",
+            return_value=frozen_llm,
+        ) as get_route,
+        patch(
+            "core.agent_runtime.invoke_structured_with_retry",
+            return_value=expected,
+        ) as invoke,
+        patch(
+            "core.agent_runtime.text_provider_id",
+            side_effect=AssertionError("global provider must not replace snapshot"),
+        ),
+    ):
+        result = StructuredOutputAgentRuntime().execute(
+            AgentRuntimeRequest(
+                schema=RuntimeOutput,
+                messages=[HumanMessage(content="analyze")],
+                provider_id="qwen",
+                model="qwen3.7-max",
+                mode="thinking",
+            )
+        )
+
+    get_route.assert_called_once_with("qwen", "qwen3.7-max", "thinking")
+    assert invoke.call_args.kwargs["llm"] is frozen_llm
+    assert (result.provider, result.model, result.mode) == (
+        "qwen",
+        "qwen3.7-max",
+        "thinking",
+    )

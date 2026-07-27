@@ -83,7 +83,7 @@ def test_harness_selects_evidence_and_emits_public_lifecycle() -> None:
         EvidenceSnippet("F001", "Figure", 1, 1, "architecture diagram", "figure"),
     ]
 
-    with patch("core.evidence.semantic_scores", return_value=[0.1, 0.9]):
+    with patch("core.hybrid_retrieval.semantic_scores", return_value=[0.1, 0.9]):
         result = AgentHarness(runtime).run(
             TEST_SPEC,
             AgentRunContext(
@@ -157,9 +157,11 @@ def test_harness_appends_agent_selected_evidence_before_final_output() -> None:
             "agentic_retrieval": True,
         }
     )
+    retrieval_requests = []
 
     class FakeRetrievalRuntime:
-        def retrieve(self, _request):
+        def retrieve(self, request):
+            retrieval_requests.append(request)
             return AgenticRetrievalResult(
                 snippets=tuple(snippets),
                 steps=(),
@@ -169,13 +171,14 @@ def test_harness_appends_agent_selected_evidence_before_final_output() -> None:
 
     with (
         patch("core.agent_harness.get_agentic_retrieval_runtime", return_value=FakeRetrievalRuntime()),
-        patch("core.evidence.semantic_scores", return_value=[0.9, 0.1]),
+        patch("core.hybrid_retrieval.semantic_scores", return_value=[0.9, 0.1]),
     ):
         result = AgentHarness(runtime).run(
             agentic_spec,
             AgentRunContext(
                 paper=ParsedPaper(title="Paper", full_text="paper"),
                 snippets=snippets,
+                retrieval_policy="force",
             ),
         )
 
@@ -183,3 +186,6 @@ def test_harness_appends_agent_selected_evidence_before_final_output() -> None:
     assert result.selected_evidence_ids == ("E001", "F001")
     assert runtime.request is not None
     assert "[F001 | figure" in runtime.request.messages[0].content
+    assert retrieval_requests[0].policy == "force"
+    assert retrieval_requests[0].config is not None
+    assert retrieval_requests[0].budget is not None

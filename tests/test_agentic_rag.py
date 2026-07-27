@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,12 +17,17 @@ from core.agentic_runtime import (
     AgenticRetrievalRequest,
     AgenticRetrievalRuntime,
 )
-from core.agentic_types import AgenticRunBudget, RetrievalAction
+from core.agentic_types import (
+    AgenticRagConfig,
+    AgenticRunBudget,
+    RetrievalAction,
+)
 from core.evidence import EvidenceSnippet
 from core.model_providers import PROVIDERS, provider_agentic_capability
 from core.paper_tools import (
     PaperToolError,
     PaperToolRegistry,
+    prefixed_snippets,
     safe_calculate,
     search_paper_evidence,
 )
@@ -68,7 +74,7 @@ def test_all_providers_have_structured_action_fallback() -> None:
 def test_paper_search_is_fresh_hybrid_retrieval_with_kind_filter() -> None:
     snippets = _snippets()
     with patch(
-        "core.paper_tools.semantic_scores",
+        "core.hybrid_retrieval.semantic_scores",
         return_value=[0.2, 0.95, 0.1],
     ):
         selected = search_paper_evidence(
@@ -78,7 +84,7 @@ def test_paper_search_is_fresh_hybrid_retrieval_with_kind_filter() -> None:
         )
     assert selected[0].id == "T001"
 
-    with patch("core.paper_tools.semantic_scores", return_value=[0.8]):
+    with patch("core.hybrid_retrieval.semantic_scores", return_value=[0.8]):
         figures = search_paper_evidence(
             snippets,
             "architecture",
@@ -140,9 +146,14 @@ def test_structured_action_loop_collects_evidence_and_stops() -> None:
             {"RAG_MODE": "agentic", "AGENTIC_TOOL_STRATEGY": "structured"},
         ),
         patch.object(runtime, "_structured_action", side_effect=actions),
-        patch("core.paper_tools.semantic_scores", return_value=[0.1, 0.9, 0.2]),
+            patch(
+                "core.hybrid_retrieval.semantic_scores",
+                return_value=[0.1, 0.9, 0.2],
+            ),
         patch("core.agentic_runtime.save_agentic_checkpoint"),
-        patch("core.agentic_runtime.get_llm") as get_llm_mock,
+        patch(
+            "core.agentic_runtime.get_agentic_planner_llm_for_route"
+        ) as planner_llm_mock,
     ):
         result = runtime.retrieve(
             AgenticRetrievalRequest(
@@ -164,7 +175,7 @@ def test_structured_action_loop_collects_evidence_and_stops() -> None:
     assert events[0] == "retrieval_started"
     assert "tool_complete" in events
     assert events[-1] == "retrieval_complete"
-    get_llm_mock.assert_not_called()
+    planner_llm_mock.assert_not_called()
 
 
 def test_native_failure_falls_back_without_losing_seed_evidence() -> None:
@@ -257,6 +268,495 @@ def test_hybrid_flag_skips_model_driven_loop() -> None:
         )
     assert result.strategy == "hybrid"
     assert result.steps == ()
+
+
+def test_adaptive_skip_policy_uses_seed_without_initializing_planner() -> None:
+    runtime = AgenticRetrievalRuntime()
+    config = AgenticRagConfig(mode="adaptive", tool_strategy="structured")
+    with (
+        patch.dict("os.environ", {"RAG_MODE": "agentic"}),
+        patch.object(runtime, "_structured_action") as planner,
+        patch("core.agentic_runtime.get_agentic_planner_llm_for_route") as get_planner,
+    ):
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="method",
+                objective="Verify the method.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                policy="skip",
+                config=config,
+            )
+        )
+
+    assert result.strategy == "adaptive_static"
+    assert result.stop_reason == "adaptive_policy_skip"
+    assert result.adaptive_triggered is False
+    assert result.mode == "adaptive"
+    assert result.policy == "skip"
+    planner.assert_not_called()
+    get_planner.assert_not_called()
+
+
+def test_hybrid_overrides_force_while_agentic_overrides_skip() -> None:
+    runtime = AgenticRetrievalRuntime()
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="证据已足够。",
+    )
+    with patch.object(runtime, "_structured_action", return_value=finish) as planner:
+        hybrid = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="method",
+                objective="Verify the method.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                policy="force",
+                config=AgenticRagConfig(
+                    mode="hybrid",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+        agentic = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="method",
+                objective="Verify the method.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                policy="skip",
+                config=AgenticRagConfig(
+                    mode="agentic",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert hybrid.strategy == "hybrid"
+    assert hybrid.steps == ()
+    assert agentic.stop_reason == "model_finished"
+    assert agentic.mode == "agentic"
+    assert planner.call_count == 1
+
+
+def test_adaptive_force_is_bounded_to_two_planner_steps() -> None:
+    runtime = AgenticRetrievalRuntime()
+    actions = [
+        RetrievalAction(
+            tool="paper_overview",
+            public_summary="查看论文结构。",
+        ),
+        RetrievalAction(
+            tool="paper_read_table",
+            evidence_id="T001",
+            public_summary="核对实验表格。",
+        ),
+    ]
+    with (
+        patch.object(runtime, "_structured_action", side_effect=actions) as planner,
+        patch("core.agentic_runtime.save_agentic_checkpoint"),
+    ):
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="experiment",
+                objective="Repair missing experiment evidence.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                policy="force",
+                budget=AgenticRunBudget(max_steps=4),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                    adaptive_max_steps=2,
+                ),
+            )
+        )
+
+    assert planner.call_count == 2
+    assert len(result.steps) == 2
+    assert result.stop_reason == "budget_exhausted"
+    assert result.adaptive_triggered is True
+    assert result.adaptive_reason == "policy_force"
+
+
+def test_adaptive_chat_gate_skips_simple_question_and_triggers_numeric_gap() -> None:
+    seed = (_snippets()[0],)
+    config = AgenticRagConfig(mode="adaptive", tool_strategy="structured")
+    simple_runtime = AgenticRetrievalRuntime()
+    with patch.object(simple_runtime, "_structured_action") as simple_planner:
+        simple = simple_runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query="Explain gated attention.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=seed,
+                config=config,
+            )
+        )
+
+    numeric_runtime = AgenticRetrievalRuntime()
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="数值证据核对完成。",
+    )
+    with patch.object(
+        numeric_runtime,
+        "_structured_action",
+        return_value=finish,
+    ) as numeric_planner:
+        numeric = numeric_runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query="What exact accuracy score is reported?",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=seed,
+                config=config,
+            )
+        )
+
+    assert simple.adaptive_triggered is False
+    assert simple.adaptive_reason == "query_seed_sufficient"
+    simple_planner.assert_not_called()
+    assert numeric.adaptive_triggered is True
+    assert numeric.adaptive_reason == "exact_numeric_verification"
+    assert numeric_planner.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        "这个方法是什么？",
+        "请概括这篇论文。",
+        "什么是注意力机制？",
+    ),
+)
+def test_adaptive_gate_keeps_simple_chinese_questions_static(question: str) -> None:
+    runtime = AgenticRetrievalRuntime()
+    with patch.object(runtime, "_structured_action") as planner:
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query=question,
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert result.adaptive_triggered is False
+    assert result.adaptive_reason == "cjk_simple_question"
+    planner.assert_not_called()
+
+
+def test_adaptive_gate_retrieves_for_substantive_low_coverage_chinese_question() -> None:
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="已核对低资源场景下的失败模式。",
+    )
+    runtime = AgenticRetrievalRuntime()
+    with patch.object(runtime, "_structured_action", return_value=finish) as planner:
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query="论文在低资源场景下有哪些失败模式和局限性？",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert result.adaptive_triggered is True
+    assert result.adaptive_reason in {
+        "low_query_coverage",
+        "low_retrieval_confidence",
+    }
+    assert planner.call_count == 1
+
+
+def test_adaptive_gate_uses_dense_bm25_disagreement_as_low_confidence() -> None:
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="已补查低置信度证据。",
+    )
+    runtime = AgenticRetrievalRuntime()
+    confidence = SimpleNamespace(
+        low_confidence=True,
+        dense_bm25_overlap_at_5=0,
+        score_margin=0.0001,
+    )
+    with (
+        patch.object(runtime, "_structured_action", return_value=finish) as planner,
+        patch(
+            "core.agentic_runtime.rank_evidence",
+            return_value=SimpleNamespace(diagnostics=confidence),
+        ),
+    ):
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query=(
+                    "Explain the unusual training failure under sparse supervision."
+                ),
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert result.adaptive_triggered is True
+    assert result.adaptive_reason == "low_retrieval_confidence"
+    assert planner.call_count == 1
+
+
+def test_exact_numeric_question_ignores_unrelated_year_in_seed() -> None:
+    seed = EvidenceSnippet(
+        "E001",
+        "Experiments",
+        1,
+        1,
+        "A 2024 evaluation discusses the accuracy metric but omits its exact value.",
+    )
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="精确数值核对完成。",
+    )
+    runtime = AgenticRetrievalRuntime()
+    with patch.object(runtime, "_structured_action", return_value=finish) as planner:
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query="What exact accuracy score is reported?",
+                registry=PaperToolRegistry.create((seed,)),
+                seed_snippets=(seed,),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert result.adaptive_triggered is True
+    assert result.adaptive_reason == "exact_numeric_verification"
+    assert planner.call_count == 1
+
+
+def test_explicit_evidence_id_does_not_bypass_exact_numeric_verification() -> None:
+    seed = EvidenceSnippet(
+        "E001",
+        "Experiments",
+        1,
+        1,
+        "A 2024 evaluation discusses accuracy but omits its exact value.",
+    )
+    finish = RetrievalAction(
+        tool="finish_retrieval",
+        public_summary="已核对指定证据对应的准确率。",
+    )
+    runtime = AgenticRetrievalRuntime()
+    with patch.object(runtime, "_structured_action", return_value=finish) as planner:
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="paper_chat",
+                objective="Answer the follow-up question.",
+                adaptive_query="请解释 E001 中准确率的具体数值是多少？",
+                registry=PaperToolRegistry.create((seed,)),
+                seed_snippets=(seed,),
+                config=AgenticRagConfig(
+                    mode="adaptive",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert result.adaptive_triggered is True
+    assert result.adaptive_reason == "exact_numeric_verification"
+    assert planner.call_count == 1
+
+
+def test_planner_factory_failure_preserves_deterministic_seed() -> None:
+    runtime = AgenticRetrievalRuntime()
+    with patch(
+        "core.agentic_runtime.get_agentic_planner_llm_for_route",
+        side_effect=RuntimeError("planner route unavailable"),
+    ):
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="method",
+                objective="Verify the method.",
+                registry=PaperToolRegistry.create(_snippets()),
+                seed_snippets=(_snippets()[0],),
+                provider_id="openai",
+                model="gpt-5.6-sol",
+                model_mode="medium",
+                config=AgenticRagConfig(
+                    mode="agentic",
+                    tool_strategy="auto",
+                ),
+            )
+        )
+
+    assert [item.id for item in result.snippets] == ["E001"]
+    assert result.fallback_used is True
+    assert result.stop_reason == "planner_fallback:RuntimeError"
+
+
+def test_multi_paper_seed_is_round_robin_bounded_without_starving_sources() -> None:
+    groups = [
+        (
+            f"P{paper_index}",
+            tuple(
+                EvidenceSnippet(
+                    f"E{item_index:03d}",
+                    "Method",
+                    item_index,
+                    item_index,
+                    f"paper {paper_index} evidence {item_index}",
+                )
+                for item_index in range(1, 7)
+            ),
+        )
+        for paper_index in range(1, 5)
+    ]
+    balanced = prefixed_snippets(groups)
+    result = AgenticRetrievalRuntime().retrieve(
+        AgenticRetrievalRequest(
+            agent_id="comparison_chat",
+            objective="Summarize the selected evidence.",
+            registry=PaperToolRegistry.create(balanced),
+            seed_snippets=balanced,
+            budget=AgenticRunBudget(max_evidence_items=16),
+            config=AgenticRagConfig(mode="hybrid"),
+        )
+    )
+
+    labels = [item.id.split(":", 1)[0] for item in result.snippets]
+    assert len(result.snippets) == 16
+    assert {label: labels.count(label) for label in set(labels)} == {
+        "P1": 4,
+        "P2": 4,
+        "P3": 4,
+        "P4": 4,
+    }
+
+
+def test_oversized_first_source_respects_char_budget_and_preserves_all_sources() -> None:
+    snippets = tuple(
+        EvidenceSnippet(
+            f"P{paper_index}:E001",
+            "Results",
+            1,
+            1,
+            "x" * (25_000 if paper_index == 1 else 2_000),
+        )
+        for paper_index in range(1, 5)
+    )
+    result = AgenticRetrievalRuntime().retrieve(
+        AgenticRetrievalRequest(
+            agent_id="comparison_chat",
+            objective="Compare the selected evidence.",
+            registry=PaperToolRegistry.create(snippets),
+            seed_snippets=snippets,
+            budget=AgenticRunBudget(
+                max_evidence_items=16,
+                max_evidence_chars=24_000,
+            ),
+            config=AgenticRagConfig(mode="hybrid"),
+        )
+    )
+
+    assert sum(len(item.text) for item in result.snippets) <= 24_000
+    assert {item.id.split(":", 1)[0] for item in result.snippets} == {
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+    }
+    assert len(result.snippets[0].text) == 6_000
+
+
+def test_new_tool_evidence_can_replace_a_full_seed_set() -> None:
+    snippets = tuple(
+        EvidenceSnippet(
+            f"E{index:03d}",
+            "Body",
+            index - 1,
+            index - 1,
+            f"evidence on page {index}",
+        )
+        for index in range(1, 18)
+    )
+    actions = [
+        RetrievalAction(
+            tool="paper_read_page",
+            page=17,
+            public_summary="读取新页面证据。",
+        ),
+        RetrievalAction(
+            tool="finish_retrieval",
+            public_summary="新增证据已足够。",
+        ),
+    ]
+    runtime = AgenticRetrievalRuntime()
+    with patch.object(runtime, "_structured_action", side_effect=actions):
+        result = runtime.retrieve(
+            AgenticRetrievalRequest(
+                agent_id="method",
+                objective="Read missing evidence.",
+                registry=PaperToolRegistry.create(snippets),
+                seed_snippets=snippets[:16],
+                budget=AgenticRunBudget(
+                    max_steps=2,
+                    max_evidence_items=16,
+                ),
+                config=AgenticRagConfig(
+                    mode="agentic",
+                    tool_strategy="structured",
+                ),
+            )
+        )
+
+    assert len(result.snippets) == 16
+    assert "E017" in {item.id for item in result.snippets}
+
+
+def test_adaptive_trace_exposes_frozen_mode_policy_and_reason() -> None:
+    result = AgenticRetrievalRuntime().retrieve(
+        AgenticRetrievalRequest(
+            agent_id="summary",
+            objective="Synthesize cited evidence.",
+            registry=PaperToolRegistry.create(_snippets()),
+            seed_snippets=(_snippets()[0],),
+            policy="skip",
+            config=AgenticRagConfig(mode="adaptive"),
+        )
+    )
+
+    assert result.public_trace() == {
+        "strategy": "adaptive_static",
+        "stop_reason": "adaptive_policy_skip",
+        "fallback_used": False,
+        "evidence_ids": ["E001"],
+        "steps": [],
+        "mode": "adaptive",
+        "policy": "skip",
+        "adaptive_triggered": False,
+        "adaptive_reason": "policy_skip",
+    }
 
 
 def test_public_checkpoints_persist_without_prompts(

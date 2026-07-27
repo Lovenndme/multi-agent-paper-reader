@@ -14,7 +14,10 @@ from agents.critic_agent import CRITIC_AGENT_SPEC
 from agents.experiment_agent import EXPERIMENT_AGENT_SPEC
 from agents.method_agent import METHOD_AGENT_SPEC
 from agents.summary_agent import SUMMARY_AGENT_SPEC
-from core.agentic_types import agentic_rag_mode, agentic_tool_strategy
+from core.agentic_types import (
+    AgenticRagConfig,
+    AgenticRunBudget,
+)
 from core.agent_harness import AgentHarnessError, AgentRunContext
 from core.analysis_events import (
     AnalysisEvent,
@@ -36,11 +39,11 @@ from core.evidence import EvidenceSnippet, build_evidence_index, evidence_payloa
 from core.graph import GraphStageError, run_pipeline_with_state
 from core.history import save_paper_analysis
 from core.model_providers import (
+    model_display_label,
     provider_label,
     provider_agentic_capability,
     provider_spec,
     selected_text_model,
-    selected_text_model_label,
     selected_text_mode,
     selected_vision_model,
     text_provider_id,
@@ -91,28 +94,54 @@ def build_model_runtime_payload() -> dict[str, Any]:
     """Describe the active route so saved analyses remain reproducible."""
 
     text_provider = text_provider_id()
+    text_model = selected_text_model(text_provider)
+    text_mode = selected_text_mode(text_provider, text_model)
+    agentic_config = AgenticRagConfig.from_env()
     visual_provider = vision_provider_id()
     payload = {
-        "text_provider": text_provider,
-        "text_provider_label": provider_label(text_provider),
-        "text_model": selected_text_model(),
-        "text_model_label": selected_text_model_label(),
-        "text_mode": selected_text_mode(),
         "vision_enabled": vision_enabled(),
         "vision_provider": visual_provider,
         "vision_provider_label": provider_label(visual_provider),
         "vision_model": selected_vision_model(),
-        "rag_mode": agentic_rag_mode(),
-        "agentic_tool_strategy": agentic_tool_strategy(),
+    }
+    return _freeze_text_runtime_payload(
+        payload,
+        provider_id=text_provider,
+        model=text_model,
+        mode=text_mode,
+        agentic_config=agentic_config,
+    )
+
+
+def _freeze_text_runtime_payload(
+    payload: dict[str, Any],
+    *,
+    provider_id: str,
+    model: str,
+    mode: str,
+    agentic_config: AgenticRagConfig,
+) -> dict[str, Any]:
+    """Make every saved text-route field derive from the same request snapshot."""
+    frozen = {
+        **payload,
+        "text_provider": provider_id,
+        "text_provider_label": provider_label(provider_id),
+        "text_model": model,
+        "text_model_label": model_display_label(provider_id, "text", model),
+        "text_mode": mode,
+        "rag_mode": agentic_config.mode,
+        "agentic_tool_strategy": agentic_config.tool_strategy,
         "agentic_native_tool_calling": provider_agentic_capability(
-            text_provider
+            provider_id
         ).native_tool_calling,
     }
-    if text_provider == "codex":
-        payload["codex_security_profile"] = (
+    if provider_id == "codex":
+        frozen["codex_security_profile"] = (
             get_codex_sdk_service().status().get("security_profile") or {}
         )
-    return payload
+    else:
+        frozen.pop("codex_security_profile", None)
+    return frozen
 
 
 def missing_model_key_message() -> str:
@@ -533,8 +562,28 @@ class PaperAnalysisOrchestrator:
         )
 
         tool_context: CodexToolContextHandle | None = None
+        provider_id = self._provider_id()
+        model = selected_text_model(provider_id)
+        model_mode = selected_text_mode(provider_id, model)
+        agentic_config = AgenticRagConfig.from_env()
+        retrieval_budget = AgenticRunBudget.from_env()
         try:
-            if self._provider_id() == "codex":
+            runtime_payload = self._runtime_payload_builder()
+        except Exception as exc:
+            raise AnalysisOrchestratorError(
+                f"Could not record model runtime metadata: {exc}",
+                stage=AnalysisStage.PREPARING,
+                category="runtime_metadata",
+            ) from exc
+        runtime_payload = _freeze_text_runtime_payload(
+            runtime_payload,
+            provider_id=provider_id,
+            model=model,
+            mode=model_mode,
+            agentic_config=agentic_config,
+        )
+        try:
+            if provider_id == "codex":
                 try:
                     tool_context = self._tool_context_factory(
                         snippets=snippets,
@@ -560,6 +609,11 @@ class PaperAnalysisOrchestrator:
                 tracker=tracker,
                 emit=emit,
                 stream=True,
+                retrieval_budget=retrieval_budget,
+                agentic_config=agentic_config,
+                retrieval_provider_id=provider_id,
+                retrieval_model=model,
+                retrieval_model_mode=model_mode,
             )
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
@@ -644,8 +698,8 @@ class PaperAnalysisOrchestrator:
             "summary_output": summary.model_dump(),
             "assessment": assessment_payload,
             "_agentic_rag": {
-                "mode": agentic_rag_mode(),
-                "strategy": agentic_tool_strategy(),
+                "mode": context.agentic_config.mode,
+                "strategy": context.agentic_config.tool_strategy,
                 "supervisor": (
                     final_state["evidence_supervisor"].model_dump()
                     if hasattr(final_state.get("evidence_supervisor"), "model_dump")
@@ -663,6 +717,7 @@ class PaperAnalysisOrchestrator:
             index_payload=index_payload,
             outputs=outputs,
             tracker=tracker,
+            runtime_payload=runtime_payload,
         )
 
     def _paper_and_evidence_events(
@@ -711,16 +766,18 @@ class PaperAnalysisOrchestrator:
         index_payload: list[dict[str, object]],
         outputs: dict[str, Any],
         tracker: AnalysisProgressTracker,
+        runtime_payload: dict[str, Any] | None = None,
     ) -> Generator[AnalysisEvent, None, None]:
         analysis_process = tracker.finish()
-        try:
-            runtime_payload = self._runtime_payload_builder()
-        except Exception as exc:
-            raise AnalysisOrchestratorError(
-                f"Could not record model runtime metadata: {exc}",
-                stage=AnalysisStage.PERSISTENCE,
-                category="runtime_metadata",
-            ) from exc
+        if runtime_payload is None:
+            try:
+                runtime_payload = self._runtime_payload_builder()
+            except Exception as exc:
+                raise AnalysisOrchestratorError(
+                    f"Could not record model runtime metadata: {exc}",
+                    stage=AnalysisStage.PERSISTENCE,
+                    category="runtime_metadata",
+                ) from exc
         analysis_id: str | None = None
         session_warning: str | None = None
 

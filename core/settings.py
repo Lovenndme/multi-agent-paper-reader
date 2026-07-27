@@ -17,7 +17,10 @@ from openai import OpenAI
 from pydantic import BaseModel, SecretStr
 
 from core.model_health import invalidate_model_catalog_health_cache
-from core.agentic_types import AgenticRunBudget, agentic_rag_mode, agentic_tool_strategy
+from core.agentic_types import (
+    AgenticRagConfig,
+    AgenticRunBudget,
+)
 from core.model_providers import (
     ModelModeSpec,
     ModelSpec,
@@ -92,6 +95,7 @@ def application_settings_payload() -> dict[str, Any]:
     active_vision_provider = vision_provider_id()
     text_configured = is_llm_configured()
     vision_configured = is_vision_configured()
+    agentic_config = AgenticRagConfig.from_env()
 
     providers = []
     for spec in PROVIDERS.values():
@@ -193,9 +197,15 @@ def application_settings_payload() -> dict[str, Any]:
         "provider": provider_label(active_text_provider),
         "api_key_configured": text_configured,
         "agentic_rag": {
-            "mode": agentic_rag_mode(),
-            "tool_strategy": agentic_tool_strategy(),
+            "mode": agentic_config.mode,
+            "tool_strategy": agentic_config.tool_strategy,
             "max_steps": AgenticRunBudget.from_env().max_steps,
+            "adaptive_max_steps": agentic_config.adaptive_max_steps,
+            "adaptive_summary_max_steps": (
+                agentic_config.adaptive_summary_max_steps
+            ),
+            "planner_model": agentic_config.planner_model or None,
+            "planner_mode": agentic_config.planner_mode or None,
             "checkpoints": os.environ.get(
                 "AGENTIC_RAG_CHECKPOINTS",
                 "true",

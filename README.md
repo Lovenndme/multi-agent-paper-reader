@@ -9,7 +9,7 @@ A local AI workspace for reading academic papers. Upload a PDF and the app combi
 ## What it does
 
 - **Multi-agent analysis** — Method, Experiment, Critic, and Summary agents collaborate on one paper.
-- **Agentic RAG on every text route** — API models and Codex can select bounded read-only paper tools, retrieve more evidence, and decide when to stop; unsupported native calls fall back to a structured-action protocol.
+- **Hierarchical retrieval + Adaptive Agentic RAG** — token-aware subchunks, parent aggregation, BM25/Dense RRF, and local Cross-Encoder reranking form the default evidence path; targeted repair and complex numerical, visual, or cross-section questions can invoke bounded read-only paper tools.
 - **Evidence supervision and repair** — an Evidence Supervisor checks coverage before synthesis and can request one targeted specialist repair round.
 - **Figures, tables, and formulas** — understands structured and visual PDF content while preserving high-resolution exports.
 - **Grounded paper chat** — follow-up answers are constrained by retrieved sections, pages, and evidence.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -24,6 +25,9 @@ _MODEL = None
 _MODEL_NAME = ""
 _VECTOR_CACHE: OrderedDict[str, np.ndarray] = OrderedDict()
 _WARNED_FAILURE = False
+_RERANKER = None
+_RERANKER_NAME = ""
+_WARNED_RERANKER_FAILURE = False
 
 
 def embeddings_enabled() -> bool:
@@ -42,8 +46,9 @@ def semantic_scores(query: str, documents: Iterable[str]) -> list[float] | None:
     if not embeddings_enabled() or not query.strip() or not texts:
         return None
     try:
-        query_vector = embed_texts([query.strip()])[0]
-        document_vectors = embed_texts(texts)
+        query_text, document_texts = _semantic_inputs(query.strip(), texts)
+        query_vector = embed_texts([query_text])[0]
+        document_vectors = embed_texts(document_texts)
         return [float(np.dot(query_vector, vector)) for vector in document_vectors]
     except Exception as exc:  # provider-free local model must never break paper reading
         global _WARNED_FAILURE
@@ -55,12 +60,53 @@ def semantic_scores(query: str, documents: Iterable[str]) -> list[float] | None:
 
 def clear_semantic_cache() -> None:
     """Clear process-local model/vector state; primarily useful for tests."""
-    global _MODEL, _MODEL_NAME, _WARNED_FAILURE
+    global _MODEL, _MODEL_NAME, _RERANKER, _RERANKER_NAME
+    global _WARNED_FAILURE, _WARNED_RERANKER_FAILURE
     with _MODEL_LOCK:
         _MODEL = None
         _MODEL_NAME = ""
+        _RERANKER = None
+        _RERANKER_NAME = ""
         _VECTOR_CACHE.clear()
         _WARNED_FAILURE = False
+        _WARNED_RERANKER_FAILURE = False
+
+
+def cross_encoder_scores(
+    query: str,
+    documents: Iterable[str],
+) -> list[float] | None:
+    """Return local cross-encoder relevance logits, or ``None`` on degradation."""
+    texts = [str(document).strip() for document in documents]
+    if not embeddings_enabled() or not query.strip() or not texts:
+        return None
+    try:
+        model_name = os.environ.get(
+            "PAPER_READER_RERANKER_MODEL",
+            "Xenova/ms-marco-MiniLM-L-6-v2",
+        ).strip()
+        if re.search(r"[\u4e00-\u9fff]", query) and (
+            "ms-marco" in model_name.casefold()
+            or model_name.casefold().endswith("-en")
+        ):
+            # The default reranker is intentionally small and English-only.
+            # Keep multilingual dense/BM25 ranks for Chinese questions instead
+            # of applying an out-of-domain cross-encoder with false confidence.
+            return None
+        model = _cross_encoder_model(model_name)
+        scores = [float(value) for value in model.rerank(query.strip(), texts)]
+        if len(scores) != len(texts):
+            raise RuntimeError("Reranker returned an unexpected score count.")
+        return scores
+    except Exception as exc:
+        global _WARNED_RERANKER_FAILURE
+        if not _WARNED_RERANKER_FAILURE:
+            LOGGER.warning(
+                "Local cross-encoder unavailable; keeping hybrid rank: %s",
+                exc,
+            )
+            _WARNED_RERANKER_FAILURE = True
+        return None
 
 
 def embed_texts(texts: list[str]) -> list[np.ndarray]:
@@ -83,7 +129,12 @@ def embed_texts(texts: list[str]) -> list[np.ndarray]:
                 missing_indices.append(index)
 
     if missing_texts:
-        vectors = list(model.embed(missing_texts))
+        vectors = list(
+            model.embed(
+                missing_texts,
+                batch_size=_embedding_batch_size(),
+            )
+        )
         if len(vectors) != len(missing_texts):
             raise RuntimeError("Embedding model returned an unexpected vector count.")
         with _MODEL_LOCK:
@@ -131,6 +182,59 @@ def _embedding_model(model_name: str):
         return _MODEL
 
 
+def _cross_encoder_model(model_name: str):
+    global _RERANKER, _RERANKER_NAME
+    with _MODEL_LOCK:
+        if _RERANKER is not None and _RERANKER_NAME == model_name:
+            return _RERANKER
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+        configured_cache = os.environ.get("PAPER_READER_MODEL_DIR")
+        cache_dir = (
+            Path(configured_cache).expanduser().resolve()
+            if configured_cache
+            else Path(__file__).resolve().parent.parent / ".paper-reader" / "models"
+        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _RERANKER = TextCrossEncoder(
+            model_name=model_name,
+            cache_dir=str(cache_dir),
+        )
+        _RERANKER_NAME = model_name
+        return _RERANKER
+
+
 def _cache_key(model_name: str, text: str) -> str:
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"{model_name}:{digest}"
+
+
+def _embedding_batch_size() -> int:
+    """Bound local inference memory without exposing FastEmbed internals."""
+    try:
+        value = int(os.environ.get("PAPER_READER_EMBEDDING_BATCH_SIZE", "64"))
+    except (TypeError, ValueError):
+        value = 64
+    return max(1, min(value, 256))
+
+
+def _semantic_inputs(
+    query: str,
+    documents: list[str],
+) -> tuple[str, list[str]]:
+    """Apply model-specific retrieval prefixes recommended by model families."""
+    model_name = os.environ.get(
+        "EMBEDDING_MODEL",
+        DEFAULT_EMBEDDING_MODEL,
+    ).strip().casefold()
+    if "multilingual-e5" in model_name:
+        return (
+            f"query: {query}",
+            [f"passage: {document}" for document in documents],
+        )
+    if model_name.startswith("baai/bge-") and model_name.endswith("-en-v1.5"):
+        return (
+            "Represent this sentence for searching relevant passages: " + query,
+            documents,
+        )
+    return query, documents

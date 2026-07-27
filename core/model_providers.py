@@ -544,8 +544,9 @@ def provider_base_url(provider_id: str) -> str:
     return spec.default_base_url
 
 
-def selected_text_model() -> str:
-    spec = provider_spec(text_provider_id())
+def selected_text_model(provider_id: str | None = None) -> str:
+    """Resolve a text model against one already-captured provider route."""
+    spec = provider_spec(provider_id or text_provider_id())
     configured_model = os.environ.get("MODEL_NAME", "").strip()
     if spec.credential_type == "codex_login":
         catalog = codex_model_catalog()
@@ -607,10 +608,14 @@ def model_mode_request_body(provider_id: str, model_id: str, mode_id: str) -> di
     return dict(mode.request_body) if mode else {}
 
 
-def selected_text_mode() -> str:
-    """Return a valid mode for the selected model, or an empty value."""
-    provider_id = text_provider_id()
-    modes = model_modes(provider_id, selected_text_model())
+def selected_text_mode(
+    provider_id: str | None = None,
+    model_id: str | None = None,
+) -> str:
+    """Return a valid mode for one already-captured provider/model route."""
+    resolved_provider = provider_id or text_provider_id()
+    resolved_model = model_id or selected_text_model(resolved_provider)
+    modes = model_modes(resolved_provider, resolved_model)
     if not modes:
         return ""
     configured = os.environ.get("MODEL_MODE", "").strip().lower()
@@ -637,7 +642,11 @@ def model_display_label(
 
 def selected_text_model_label() -> str:
     provider_id = text_provider_id()
-    return model_display_label(provider_id, "text", selected_text_model())
+    return model_display_label(
+        provider_id,
+        "text",
+        selected_text_model(provider_id),
+    )
 
 
 def active_text_model_identity() -> str:

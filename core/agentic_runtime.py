@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -12,24 +13,27 @@ from uuid import uuid4
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.agentic_types import (
+    AgenticRagConfig,
     AgenticRetrievalResult,
     AgenticRunBudget,
     RetrievalAction,
     RetrievalDecision,
+    RetrievalPolicy,
     RetrievalStep,
-    agentic_rag_mode,
-    agentic_tool_strategy,
 )
 from core.agentic_checkpoints import save_agentic_checkpoint
 from core.evidence import EvidenceSnippet
+from core.hybrid_retrieval import rank_evidence
 from core.model_providers import (
     provider_agentic_capability,
+    selected_text_model,
+    selected_text_mode,
     text_provider_id,
 )
 from core.paper_tools import PaperToolError, PaperToolRegistry
 from core.public_analysis import sanitize_visible_text
 from utils.llm import (
-    get_llm,
+    get_agentic_planner_llm_for_route,
     invoke_structured_with_retry,
     invoke_with_retry,
     parse_structured_output,
@@ -49,45 +53,166 @@ class AgenticRetrievalRequest:
     seed_snippets: tuple[EvidenceSnippet, ...] = ()
     budget: AgenticRunBudget | None = None
     provider_id: str | None = None
+    model: str | None = None
+    model_mode: str | None = None
     llm: Any | None = None
     tool_context_path: str | Path | None = None
     retrieval_directive: str | None = None
+    adaptive_query: str | None = None
+    policy: RetrievalPolicy = "auto"
+    config: AgenticRagConfig | None = None
     emit: RetrievalEventEmitter | None = None
     run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AdaptiveGateDecision:
+    """Deterministic, auditable decision made before any planner model call."""
+
+    should_retrieve: bool
+    reason: str
+    signals: tuple[str, ...] = ()
 
 
 class AgenticRetrievalRuntime:
     """Let a model iteratively select safe paper tools within fixed limits."""
 
     def retrieve(self, request: AgenticRetrievalRequest) -> AgenticRetrievalResult:
+        config = request.config or AgenticRagConfig.from_env()
         budget = request.budget or AgenticRunBudget.from_env()
         seed = _bounded_unique(
             request.seed_snippets,
             max_items=budget.max_evidence_items,
             max_chars=budget.max_evidence_chars,
         )
-        if agentic_rag_mode() == "hybrid":
+        mode = config.mode
+        if mode == "hybrid":
             return AgenticRetrievalResult(
                 snippets=tuple(seed),
                 steps=(),
                 strategy="hybrid",
                 stop_reason="configured_hybrid_mode",
+                mode=mode,
+                policy=request.policy,
+            )
+
+        runtime_id = request.run_id or uuid4().hex
+        adaptive: AdaptiveGateDecision | None = None
+        if mode == "adaptive":
+            if request.policy == "skip":
+                adaptive = AdaptiveGateDecision(
+                    False,
+                    "policy_skip",
+                    ("request_policy:skip",),
+                )
+            elif request.policy == "force":
+                adaptive = AdaptiveGateDecision(
+                    True,
+                    "policy_force",
+                    ("request_policy:force",),
+                )
+            else:
+                adaptive = adaptive_retrieval_decision(
+                    request,
+                    seed,
+                    config=config,
+                )
+            _emit(
+                request,
+                "retrieval_started",
+                {
+                    "run_id": runtime_id,
+                    "agent": request.agent_id,
+                    "summary": "正在检查确定性预选证据是否需要自主补检索。",
+                    "seed_evidence_count": len(seed),
+                    "adaptive": True,
+                },
+            )
+            if not adaptive.should_retrieve:
+                policy_skip = request.policy == "skip"
+                _emit(
+                    request,
+                    "coverage_checked",
+                    {
+                        "run_id": runtime_id,
+                        "agent": request.agent_id,
+                        "step": 0,
+                        "summary": (
+                            "当前阶段按策略直接使用预选证据，未启动额外模型规划。"
+                            if policy_skip
+                            else "预选证据已满足当前任务，已跳过额外模型规划。"
+                        ),
+                        "sufficient": None if policy_skip else True,
+                        "adaptive": True,
+                        "reason": adaptive.reason,
+                    },
+                )
+                _emit(
+                    request,
+                    "retrieval_complete",
+                    {
+                        "run_id": runtime_id,
+                        "agent": request.agent_id,
+                        "summary": (
+                            f"当前阶段继续使用 {len(seed)} 个预选证据片段。"
+                            if policy_skip
+                            else f"按需检索检查完成，继续使用 {len(seed)} 个预选证据片段。"
+                        ),
+                        "evidence_count": len(seed),
+                        "steps": 0,
+                        "fallback_used": False,
+                        "adaptive": True,
+                        "reason": adaptive.reason,
+                    },
+                )
+                return AgenticRetrievalResult(
+                    snippets=tuple(seed),
+                    steps=(),
+                    strategy="adaptive_static",
+                    stop_reason=(
+                        "adaptive_policy_skip"
+                        if request.policy == "skip"
+                        else "adaptive_seed_sufficient"
+                    ),
+                    mode=mode,
+                    policy=request.policy,
+                    adaptive_triggered=False,
+                    adaptive_reason=adaptive.reason,
+                )
+            budget = replace(
+                budget,
+                max_steps=min(
+                    budget.max_steps,
+                    config.max_adaptive_steps(request.agent_id),
+                ),
             )
 
         provider = request.provider_id or text_provider_id()
-        configured_strategy = agentic_tool_strategy()
-        capability = provider_agentic_capability(provider)
-        runtime_id = request.run_id or uuid4().hex
-        _emit(
+        model = request.model or selected_text_model(provider)
+        model_mode = request.model_mode
+        if model_mode is None:
+            model_mode = selected_text_mode(provider, model)
+        request = replace(
             request,
-            "retrieval_started",
-            {
-                "run_id": runtime_id,
-                "agent": request.agent_id,
-                "summary": "正在根据任务判断是否需要补充检索论文证据。",
-                "seed_evidence_count": len(seed),
-            },
+            provider_id=provider,
+            model=model,
+            model_mode=model_mode,
+            config=config,
+            budget=budget,
         )
+        configured_strategy = config.tool_strategy
+        capability = provider_agentic_capability(provider)
+        if adaptive is None:
+            _emit(
+                request,
+                "retrieval_started",
+                {
+                    "run_id": runtime_id,
+                    "agent": request.agent_id,
+                    "summary": "正在根据任务判断是否需要补充检索论文证据。",
+                    "seed_evidence_count": len(seed),
+                },
+            )
 
         collected = list(seed)
         steps: list[RetrievalStep] = []
@@ -95,15 +220,10 @@ class AgenticRetrievalRuntime:
         seen_actions: set[str] = set()
         fallback_used = False
         strategy = "structured"
-        use_native = False
-        if (
+        use_native = (
             configured_strategy in {"auto", "native"}
             and capability.native_tool_calling
-        ):
-            native_llm = request.llm or get_llm()
-            use_native = hasattr(native_llm, "bind_tools")
-            if use_native and request.llm is None:
-                request = replace(request, llm=native_llm)
+        )
 
         for step_number in range(1, budget.max_steps + 1):
             try:
@@ -167,6 +287,10 @@ class AgenticRetrievalRuntime:
                     strategy=strategy,
                     stop_reason=stop_reason,
                     fallback_used=True,
+                    mode=mode,
+                    policy=request.policy,
+                    adaptive_triggered=True if adaptive is not None else None,
+                    adaptive_reason=adaptive.reason if adaptive is not None else None,
                 )
 
             if action.limit > budget.max_results_per_step:
@@ -252,8 +376,9 @@ class AgenticRetrievalRuntime:
                     for snippet in observation.snippets
                     if snippet.id not in {item.id for item in collected}
                 ]
-                collected = _bounded_unique(
-                    [*collected, *new_snippets],
+                collected = _merge_evidence(
+                    collected,
+                    new_snippets,
                     max_items=budget.max_evidence_items,
                     max_chars=budget.max_evidence_chars,
                 )
@@ -365,6 +490,10 @@ class AgenticRetrievalRuntime:
             strategy=strategy,
             stop_reason=stop_reason,
             fallback_used=fallback_used,
+            mode=mode,
+            policy=request.policy,
+            adaptive_triggered=True if adaptive is not None else None,
+            adaptive_reason=adaptive.reason if adaptive is not None else None,
         )
 
     def _native_action(
@@ -374,7 +503,18 @@ class AgenticRetrievalRuntime:
         observations: Sequence[str],
         budget: AgenticRunBudget,
     ) -> RetrievalAction:
-        llm = request.llm or get_llm()
+        config = request.config or AgenticRagConfig.from_env()
+        llm = request.llm or get_agentic_planner_llm_for_route(
+            request.provider_id or text_provider_id(),
+            request.model or selected_text_model(),
+            (
+                request.model_mode
+                if request.model_mode is not None
+                else selected_text_mode()
+            ),
+            config.planner_model,
+            config.planner_mode,
+        )
         bound = llm.bind_tools(request.registry.native_tools())
         response = invoke_with_retry(
             bound,
@@ -399,12 +539,25 @@ class AgenticRetrievalRuntime:
     ) -> RetrievalAction:
         messages = _planner_messages(request, evidence, observations, budget)
         if request.llm is None:
+            config = request.config or AgenticRagConfig.from_env()
+            planner_llm = get_agentic_planner_llm_for_route(
+                request.provider_id or text_provider_id(),
+                request.model or selected_text_model(),
+                (
+                    request.model_mode
+                    if request.model_mode is not None
+                    else selected_text_mode()
+                ),
+                config.planner_model,
+                config.planner_mode,
+            )
             decision = invoke_structured_with_retry(
                 RetrievalDecision,
                 messages,
                 retries=budget.planner_retries,
                 delay=1.0,
                 tool_context_path=request.tool_context_path,
+                llm=planner_llm,
             )
             return decision.action
 
@@ -438,6 +591,421 @@ class AgenticRetrievalRuntime:
                 delay=1.0,
             )
             return parse_structured_output(raw, RetrievalDecision).action
+
+
+def adaptive_retrieval_decision(
+    request: AgenticRetrievalRequest,
+    seed: Sequence[EvidenceSnippet],
+    *,
+    config: AgenticRagConfig | None = None,
+) -> AdaptiveGateDecision:
+    """Decide whether bounded model planning is worth its latency for this request."""
+    config = config or request.config or AgenticRagConfig.from_env()
+    if not seed:
+        return AdaptiveGateDecision(True, "missing_seed", ("seed_empty",))
+
+    agent_id = request.agent_id.strip().lower()
+    if agent_id == "comparison":
+        return AdaptiveGateDecision(
+            True,
+            "cross_paper_reasoning",
+            ("cross_paper",),
+        )
+    if agent_id == "summary":
+        warnings_present = _summary_warnings_present(request.retrieval_directive)
+        if warnings_present:
+            return AdaptiveGateDecision(
+                True,
+                "summary_warnings",
+                ("supervisor_warning",),
+            )
+        return AdaptiveGateDecision(
+            False,
+            "summary_seed_sufficient",
+            ("upstream_citations",),
+        )
+    if agent_id in {"paper_chat", "comparison_chat"}:
+        return _question_adaptive_decision(
+            request.adaptive_query or request.objective,
+            request.registry.snippets,
+            seed,
+        )
+
+    seed_chars = sum(len(snippet.text) for snippet in seed)
+    if len(seed) < config.adaptive_min_seed_items:
+        return AdaptiveGateDecision(
+            True,
+            "insufficient_seed_items",
+            (f"seed_items:{len(seed)}",),
+        )
+    if seed_chars < config.adaptive_min_seed_chars:
+        return AdaptiveGateDecision(
+            True,
+            "insufficient_seed_chars",
+            (f"seed_chars:{seed_chars}",),
+        )
+
+    if agent_id in {"method", "experiment", "critic"}:
+        return _specialist_adaptive_decision(agent_id, request.registry.snippets, seed)
+
+    return _question_adaptive_decision(
+        request.adaptive_query or request.objective,
+        request.registry.snippets,
+        seed,
+    )
+
+
+def _specialist_adaptive_decision(
+    agent_id: str,
+    corpus: Sequence[EvidenceSnippet],
+    seed: Sequence[EvidenceSnippet],
+) -> AdaptiveGateDecision:
+    corpus_text = _evidence_search_text(corpus)
+    seed_text = _evidence_search_text(seed)
+    if agent_id == "method":
+        method_markers = (
+            "method",
+            "methodology",
+            "model",
+            "approach",
+            "framework",
+            "architecture",
+            "algorithm",
+            "proposed",
+            "方法",
+            "模型",
+            "架构",
+            "算法",
+        )
+        if _contains_any(corpus_text, method_markers) and not _contains_any(
+            seed_text,
+            method_markers,
+        ):
+            return AdaptiveGateDecision(True, "method_facet_missing", ("method",))
+        if any(item.kind == "figure" for item in corpus) and not any(
+            item.kind == "figure" for item in seed
+        ):
+            return AdaptiveGateDecision(True, "method_figure_missing", ("figure",))
+    elif agent_id == "experiment":
+        if any(item.kind == "table" for item in corpus) and not any(
+            item.kind == "table" for item in seed
+        ):
+            return AdaptiveGateDecision(
+                True,
+                "experiment_table_missing",
+                ("table",),
+            )
+        experiment_markers = (
+            "experiment",
+            "evaluation",
+            "result",
+            "dataset",
+            "metric",
+            "baseline",
+            "ablation",
+            "实验",
+            "评估",
+            "结果",
+            "数据集",
+            "指标",
+            "消融",
+        )
+        if _contains_any(corpus_text, experiment_markers) and not _contains_any(
+            seed_text,
+            experiment_markers,
+        ):
+            return AdaptiveGateDecision(
+                True,
+                "experiment_facet_missing",
+                ("experiment",),
+            )
+    else:
+        critic_markers = (
+            "limitation",
+            "limitations",
+            "failure",
+            "threat",
+            "discussion",
+            "future work",
+            "challenge",
+            "局限",
+            "失败",
+            "讨论",
+            "未来",
+            "挑战",
+        )
+        if _contains_any(corpus_text, critic_markers) and not _contains_any(
+            seed_text,
+            critic_markers,
+        ):
+            return AdaptiveGateDecision(
+                True,
+                "critic_facet_missing",
+                ("limitation",),
+            )
+    return AdaptiveGateDecision(
+        False,
+        f"{agent_id}_seed_sufficient",
+        ("role_seed",),
+    )
+
+
+def _question_adaptive_decision(
+    objective: str,
+    corpus: Sequence[EvidenceSnippet],
+    seed: Sequence[EvidenceSnippet],
+) -> AdaptiveGateDecision:
+    lowered = objective.casefold()
+    explicit_ids = {
+        value.upper()
+        for value in re.findall(
+            r"\b(?:P\d+:)?[ETF]\d{3}\b",
+            objective,
+            flags=re.IGNORECASE,
+        )
+    }
+    seed_ids = {item.id.upper() for item in seed}
+
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", objective))
+    query_terms = _adaptive_query_terms(objective)
+    coverage = _query_seed_coverage(objective, seed)
+    signals: list[str] = [f"lexical_coverage:{coverage:.2f}"]
+
+    exact_numeric = _contains_any(
+        lowered,
+        (
+            "exact",
+            "score",
+            "bleu",
+            "accuracy",
+            "percentage",
+            "percent",
+            "how many",
+            "多少",
+            "数值",
+            "具体数值",
+            "具体结果",
+            "提升",
+            "降低",
+            "准确率",
+            "百分比",
+        ),
+    )
+    numeric = _contains_any(
+        lowered,
+        ("quantitative", "result", "results", "实验结果", "结果"),
+    )
+    table = _contains_any(
+        lowered,
+        ("table", "表格", "表中", "图表"),
+    )
+    formula = _contains_any(
+        lowered,
+        ("equation", "formula", "公式", "方程"),
+    )
+    visual = _contains_any(
+        lowered,
+        (
+            "figure",
+            "diagram",
+            "architecture",
+            "pipeline",
+            "图像",
+            "图中",
+            "架构图",
+            "流程图",
+        ),
+    )
+    cross_section = _contains_any(
+        lowered,
+        (
+            "compare",
+            "difference",
+            "conflict",
+            "across",
+            "relationship",
+            "对比",
+            "差异",
+            "冲突",
+            "跨章节",
+            "关系",
+        ),
+    )
+    if cross_section:
+        signals.append("cross_section")
+        return AdaptiveGateDecision(True, "cross_section_question", tuple(signals))
+    if exact_numeric:
+        signals.append("exact_numeric")
+        return AdaptiveGateDecision(
+            True,
+            "exact_numeric_verification",
+            tuple(signals),
+        )
+    if formula:
+        signals.append("formula")
+        return AdaptiveGateDecision(
+            True,
+            "formula_verification",
+            tuple(signals),
+        )
+    if explicit_ids and explicit_ids <= seed_ids:
+        return AdaptiveGateDecision(
+            False,
+            "explicit_evidence_seeded",
+            (*signals, "explicit_evidence"),
+        )
+    if table:
+        signals.append("table")
+        if not any(item.kind == "table" for item in seed):
+            return AdaptiveGateDecision(
+                True,
+                "table_evidence_uncertain",
+                tuple(signals),
+            )
+    if numeric:
+        signals.append("numeric")
+        seed_has_numeric = any(
+            item.kind == "table" or re.search(r"\d+(?:\.\d+)?%?", item.text)
+            for item in seed
+        )
+        if not seed_has_numeric or (not has_cjk and coverage < 0.35):
+            return AdaptiveGateDecision(
+                True,
+                "numeric_evidence_uncertain",
+                tuple(signals),
+            )
+    if visual:
+        signals.append("visual")
+        corpus_has_figure = any(item.kind == "figure" for item in corpus)
+        seed_has_figure = any(item.kind == "figure" for item in seed)
+        if corpus_has_figure and (not seed_has_figure or coverage < 0.35):
+            return AdaptiveGateDecision(
+                True,
+                "visual_evidence_uncertain",
+                tuple(signals),
+            )
+    if (
+        len(query_terms) >= 4
+        and coverage < 0.50
+        and (not has_cjk or len(query_terms) >= 8)
+    ):
+        confidence = rank_evidence(
+            corpus,
+            objective,
+            candidate_pool=10,
+            rerank=False,
+        ).diagnostics
+        signals.extend(
+            (
+                f"dense_bm25_overlap_at_5:{confidence.dense_bm25_overlap_at_5}",
+                f"rank_margin:{confidence.score_margin:.4f}",
+            )
+        )
+        if confidence.low_confidence:
+            return AdaptiveGateDecision(
+                True,
+                "low_retrieval_confidence",
+                tuple(signals),
+            )
+    if has_cjk and coverage < 0.10 and len(query_terms) >= 8:
+        return AdaptiveGateDecision(
+            True,
+            "low_query_coverage",
+            (*signals, "substantive_cjk_query"),
+        )
+    if has_cjk:
+        return AdaptiveGateDecision(
+            False,
+            "cjk_simple_question",
+            tuple(signals),
+        )
+    if coverage < 0.25:
+        return AdaptiveGateDecision(
+            True,
+            "low_query_coverage",
+            tuple(signals),
+        )
+    return AdaptiveGateDecision(
+        False,
+        "query_seed_sufficient",
+        tuple(signals),
+    )
+
+
+def _summary_warnings_present(directive: str | None) -> bool:
+    text = (directive or "").replace(" ", "")
+    if not text:
+        return False
+    marker = '"supervisor_warnings":'
+    if marker not in text:
+        return False
+    return f"{marker}[]" not in text
+
+
+def _query_seed_coverage(
+    objective: str,
+    seed: Sequence[EvidenceSnippet],
+) -> float:
+    terms = _adaptive_query_terms(objective)
+    if not terms:
+        return 1.0
+    evidence = _evidence_search_text(seed)
+    covered = sum(term in evidence for term in terms)
+    return covered / len(terms)
+
+
+def _adaptive_query_terms(value: str) -> set[str]:
+    generic = {
+        "answer",
+        "current",
+        "evidence",
+        "exact",
+        "follow",
+        "needed",
+        "original",
+        "paper",
+        "question",
+        "retrieve",
+        "task",
+        "this",
+        "verify",
+        "with",
+        "from",
+        "that",
+        "what",
+        "which",
+        "needed",
+        "论文",
+        "证据",
+        "问题",
+        "回答",
+        "检索",
+        "当前",
+    }
+    terms = {
+        word.casefold()
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", value)
+        if word.casefold() not in generic
+    }
+    for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", value):
+        terms.update(
+            sequence[index : index + 2]
+            for index in range(max(0, len(sequence) - 1))
+            if sequence[index : index + 2] not in generic
+        )
+    return terms
+
+
+def _evidence_search_text(snippets: Sequence[EvidenceSnippet]) -> str:
+    return "\n".join(
+        f"{item.section}\n{item.text}"
+        for item in snippets
+    ).casefold()
+
+
+def _contains_any(value: str, markers: Sequence[str]) -> bool:
+    lowered = value.casefold()
+    return any(marker.casefold() in lowered for marker in markers)
 
 
 _DEFAULT_AGENTIC_RUNTIME = AgenticRetrievalRuntime()
@@ -541,20 +1109,98 @@ def _bounded_unique(
     max_items: int,
     max_chars: int,
 ) -> list[EvidenceSnippet]:
-    selected: list[EvidenceSnippet] = []
+    if max_items <= 0 or max_chars <= 0:
+        return []
+
+    unique: list[EvidenceSnippet] = []
     seen: set[str] = set()
-    total_chars = 0
     for snippet in snippets:
         if snippet.id in seen:
             continue
-        if selected and total_chars + len(snippet.text) > max_chars:
-            continue
-        selected.append(snippet)
         seen.add(snippet.id)
-        total_chars += len(snippet.text)
-        if len(selected) >= max_items:
+        unique.append(snippet)
+
+    ordered = _round_robin_sources(unique)
+    source_order = tuple(dict.fromkeys(_evidence_source_key(item) for item in ordered))
+    active_source_count = min(len(source_order), max_items, max_chars)
+    active_sources = set(source_order[:active_source_count])
+    sources_awaiting_first_item = set(active_sources)
+
+    selected: list[EvidenceSnippet] = []
+    total_chars = 0
+    for snippet in ordered:
+        source = _evidence_source_key(snippet)
+        if source not in active_sources:
+            continue
+        if len(selected) >= max_items or total_chars >= max_chars:
             break
+
+        remaining_chars = max_chars - total_chars
+        if source in sources_awaiting_first_item:
+            # Reserve an equal share for every source that has not appeared yet.
+            # This prevents one oversized table or figure from consuming the
+            # complete multi-paper context window.
+            allowed_chars = max(
+                1,
+                remaining_chars // len(sources_awaiting_first_item),
+            )
+        else:
+            allowed_chars = remaining_chars
+        bounded_text = snippet.text[:allowed_chars]
+        if not bounded_text:
+            continue
+        selected.append(
+            snippet
+            if bounded_text == snippet.text
+            else replace(snippet, text=bounded_text)
+        )
+        sources_awaiting_first_item.discard(source)
+        total_chars += len(bounded_text)
     return selected
+
+
+def _merge_evidence(
+    existing: Sequence[EvidenceSnippet],
+    new_snippets: Sequence[EvidenceSnippet],
+    *,
+    max_items: int,
+    max_chars: int,
+) -> list[EvidenceSnippet]:
+    """Prioritize newly read evidence while preserving every paper source."""
+    prioritized: list[EvidenceSnippet] = []
+    seen: set[str] = set()
+    for snippet in [*new_snippets, *existing]:
+        if snippet.id in seen:
+            continue
+        seen.add(snippet.id)
+        prioritized.append(snippet)
+    return _bounded_unique(
+        _round_robin_sources(prioritized),
+        max_items=max_items,
+        max_chars=max_chars,
+    )
+
+
+def _round_robin_sources(
+    snippets: Sequence[EvidenceSnippet],
+) -> list[EvidenceSnippet]:
+    groups: dict[str, list[EvidenceSnippet]] = {}
+    for snippet in snippets:
+        groups.setdefault(_evidence_source_key(snippet), []).append(snippet)
+    if len(groups) <= 1:
+        return list(snippets)
+
+    output: list[EvidenceSnippet] = []
+    for index in range(max(len(group) for group in groups.values())):
+        for group in groups.values():
+            if index < len(group):
+                output.append(group[index])
+    return output
+
+
+def _evidence_source_key(snippet: EvidenceSnippet) -> str:
+    match = re.match(r"^(P\d+):", snippet.id, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else "single"
 
 
 def _action_key(action: RetrievalAction) -> str:

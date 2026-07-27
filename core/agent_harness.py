@@ -14,7 +14,12 @@ from core.agentic_runtime import (
     AgenticRetrievalRequest,
     get_agentic_retrieval_runtime,
 )
-from core.agentic_types import AgenticRetrievalResult, AgenticRunBudget
+from core.agentic_types import (
+    AgenticRagConfig,
+    AgenticRetrievalResult,
+    AgenticRunBudget,
+    RetrievalPolicy,
+)
 from core.agent_runtime import (
     AgentRuntime,
     AgentRuntimeCallbacks,
@@ -24,6 +29,11 @@ from core.agent_runtime import (
 )
 from core.analysis_progress import AnalysisProgressTracker
 from core.evidence import EvidenceSnippet, format_evidence_context, select_evidence_snippets
+from core.model_providers import (
+    selected_text_model,
+    selected_text_mode,
+    text_provider_id,
+)
 from core.pdf_parser import ParsedPaper
 from core.paper_tools import PaperToolRegistry
 from core.public_analysis import public_agent_output, sanitize_visible_text
@@ -68,8 +78,29 @@ class AgentRunContext:
     callbacks: AgentRuntimeCallbacks = field(default_factory=AgentRuntimeCallbacks)
     tool_registry: PaperToolRegistry | None = None
     retrieval_directive: str | None = None
-    retrieval_budget: AgenticRunBudget | None = None
+    retrieval_budget: AgenticRunBudget = field(
+        default_factory=AgenticRunBudget.from_env
+    )
+    agentic_config: AgenticRagConfig = field(
+        default_factory=AgenticRagConfig.from_env
+    )
+    retrieval_policy: RetrievalPolicy = "auto"
+    retrieval_provider_id: str | None = None
+    retrieval_model: str | None = None
+    retrieval_model_mode: str | None = None
     seed_evidence_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        provider_id = self.retrieval_provider_id or text_provider_id()
+        model = self.retrieval_model or selected_text_model(provider_id)
+        mode = (
+            self.retrieval_model_mode
+            if self.retrieval_model_mode is not None
+            else selected_text_mode(provider_id, model)
+        )
+        object.__setattr__(self, "retrieval_provider_id", provider_id)
+        object.__setattr__(self, "retrieval_model", model)
+        object.__setattr__(self, "retrieval_model_mode", mode)
 
 
 @dataclass(frozen=True)
@@ -162,6 +193,11 @@ class AgentHarness:
                         registry=registry,
                         seed_snippets=tuple(selected),
                         budget=context.retrieval_budget,
+                        config=context.agentic_config,
+                        policy=context.retrieval_policy,
+                        provider_id=context.retrieval_provider_id,
+                        model=context.retrieval_model,
+                        model_mode=context.retrieval_model_mode,
                         tool_context_path=context.tool_context_path,
                         retrieval_directive=context.retrieval_directive,
                         emit=lambda event_type, payload: self._retrieval_event(
@@ -194,6 +230,9 @@ class AgentHarness:
                     retries=spec.stream_retries if context.stream else spec.invoke_retries,
                     delay=spec.retry_delay,
                     tool_context_path=context.tool_context_path,
+                    provider_id=context.retrieval_provider_id,
+                    model=context.retrieval_model,
+                    mode=context.retrieval_model_mode,
                     callbacks=callbacks,
                 )
             )

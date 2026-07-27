@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from core.agentic_types import RetrievalAction, ToolObservation
 from core.evidence import EvidenceSnippet, format_evidence_context
 from core.pdf_parser import ParsedPaper, _normalize_title
-from core.semantic_search import semantic_scores
+from core.hybrid_retrieval import RetrievalRanking, rank_evidence
 
 
 class PaperToolError(ValueError):
@@ -395,57 +395,21 @@ def search_paper_evidence(
     *,
     kind: str = "any",
     limit: int = 6,
+    rerank: bool | None = None,
 ) -> list[EvidenceSnippet]:
     """Run fresh hybrid retrieval for an arbitrary model-selected query."""
-    clean_query = " ".join(str(query).split())[:800]
-    if not clean_query:
-        raise PaperToolError("检索词不能为空。")
-    candidates = [
-        snippet
-        for snippet in snippets
-        if kind == "any" or snippet.kind == kind
-    ]
-    if not candidates:
-        return []
-    documents = [f"{snippet.section}\n{snippet.text}" for snippet in candidates]
-    similarities = semantic_scores(clean_query, documents)
-    terms = _query_terms(clean_query)
-    explicit_ids = {
-        match.upper()
-        for match in re.findall(r"(?:[A-Z0-9]+:)?[ETF]\d{3}", clean_query, re.I)
-    }
-    scored: list[tuple[float, int, EvidenceSnippet]] = []
-    lowered_query = clean_query.lower()
-    for index, snippet in enumerate(candidates):
-        section = snippet.section.lower()
-        text = snippet.text.lower()
-        score = similarities[index] * 20.0 if similarities is not None else 0.0
-        normalized_id = snippet.id.upper()
-        if normalized_id in explicit_ids or any(item.endswith(f":{normalized_id}") for item in explicit_ids):
-            score += 100.0
-        for term in terms:
-            if term in section:
-                score += 3.0
-            score += min(text.count(term), 4) * 0.8
-        if snippet.kind == "table" and any(
-            marker in lowered_query
-            for marker in ("table", "表", "result", "结果", "metric", "指标", "ablation", "消融")
-        ):
-            score += 5.0
-        if snippet.kind == "figure" and any(
-            marker in lowered_query
-            for marker in ("figure", "图", "architecture", "架构", "pipeline", "流程")
-        ):
-            score += 4.0
-        scored.append((score, index, snippet))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    ranking = search_paper_evidence_ranking(
+        snippets,
+        query,
+        kind=kind,
+        rerank=rerank,
+    )
     bounded = max(1, min(int(limit), 10))
     selected: list[EvidenceSnippet] = []
     seen_sections: dict[str, int] = {}
-    for score, _, snippet in scored:
-        if similarities is None and score <= 0 and selected:
-            continue
-        section_key = snippet.section.lower()
+    for hit in ranking.hits:
+        snippet = hit.snippet
+        section_key = snippet.section.casefold()
         if seen_sections.get(section_key, 0) >= 3:
             continue
         selected.append(snippet)
@@ -455,13 +419,45 @@ def search_paper_evidence(
     return selected
 
 
+def search_paper_evidence_ranking(
+    snippets: Sequence[EvidenceSnippet],
+    query: str,
+    *,
+    kind: str = "any",
+    rerank: bool | None = None,
+) -> RetrievalRanking:
+    """Return full hierarchical retrieval ranks and confidence diagnostics."""
+    clean_query = " ".join(str(query).split())[:800]
+    if not clean_query:
+        raise PaperToolError("检索词不能为空。")
+    candidates = [
+        snippet
+        for snippet in snippets
+        if kind == "any" or snippet.kind == kind
+    ]
+    if not candidates:
+        return rank_evidence((), clean_query, rerank=rerank)
+    return rank_evidence(candidates, clean_query, rerank=rerank)
+
+
 def prefixed_snippets(
     groups: Iterable[tuple[str, Sequence[EvidenceSnippet]]],
 ) -> tuple[EvidenceSnippet, ...]:
-    """Create a collision-free evidence view for multi-paper retrieval."""
+    """Create a collision-free, source-balanced multi-paper evidence view."""
+    materialized = [
+        (label, tuple(snippets))
+        for label, snippets in groups
+    ]
     output: list[EvidenceSnippet] = []
-    for label, snippets in groups:
-        for snippet in snippets:
+    max_group_size = max(
+        (len(snippets) for _, snippets in materialized),
+        default=0,
+    )
+    for index in range(max_group_size):
+        for label, snippets in materialized:
+            if index >= len(snippets):
+                continue
+            snippet = snippets[index]
             output.append(
                 EvidenceSnippet(
                     id=f"{label}:{snippet.id}",

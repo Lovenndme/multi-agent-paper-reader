@@ -63,8 +63,8 @@ Method、Experiment、Critic、Summary 和 Comparison 都已使用同一契约�
 `core/agent_harness.py` 是 Agent 的统一外层控制面。每次运行会：
 
 1. 根据 `retrieval_profile` 从当前论文证据索引中生成确定性 seed；
-2. 当 `RAG_MODE=agentic` 时，调用通用 Agentic Runtime，让模型在只读工具中
-   自主补充证据并判断停止；
+2. 根据冻结的 `hybrid / adaptive / agentic` 模式和 `skip / auto / force`
+   请求策略调用通用 Agentic Runtime；adaptive 跳过时不会初始化 planner；
 3. 构造最终 Agent 消息；
 4. 通过 `AnalysisProgressTracker` 发出 `agent_started`；
 5. 将公开检索事件、过程摘要和工具活动写入过程记录；
