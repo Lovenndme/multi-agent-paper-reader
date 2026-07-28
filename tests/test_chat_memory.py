@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -46,6 +47,43 @@ class _FakeManager:
                 "fake-memory",
                 {"kind": "PaperReaderMemory", "content": self.memory.model_dump(mode="json")},
             )
+        return []
+
+
+class _FakeSearchStore:
+    def __init__(self, full_query: str, clause: str):
+        now = datetime.now(timezone.utc)
+        value = {
+            "kind": "PaperReaderMemory",
+            "content": PaperReaderMemory(
+                category="reference",
+                subject="Reproduction repository URL",
+                content="Repository: https://github.com/example/helios-repro",
+            ).model_dump(mode="json"),
+        }
+        self.low = SimpleNamespace(
+            key="repository",
+            value=value,
+            score=0.32,
+            created_at=now,
+            updated_at=now,
+        )
+        self.match = SimpleNamespace(
+            key="repository",
+            value=value,
+            score=0.44,
+            created_at=now,
+            updated_at=now,
+        )
+        self.full_query = full_query
+        self.clause = clause
+
+    def search(self, _namespace, *, query, limit):
+        del limit
+        if query == self.full_query:
+            return [self.low]
+        if query == self.clause:
+            return [self.match]
         return []
 
 
@@ -229,6 +267,26 @@ class TestChatMemory(unittest.TestCase):
         reset_langmem_store()
         recalled = get_prompt_memory(second["id"], "去哪里看复现说明？")
         self.assertIn("github.com/example/reproduction", recalled.recalled_topics[0]["content"])
+
+    def test_compound_query_recalls_best_memory_per_question_clause(self):
+        clause = "复现项目的唯一参考仓库地址是什么？"
+        full_query = (
+            "请回答下列问题，不要猜测。\n"
+            f"- M04: {clause}\n"
+            "- E04: 论文使用的初始学习率是多少？"
+        )
+        fake_store = _FakeSearchStore(full_query, clause)
+
+        with patch("core.langmem_store.get_langmem_store", return_value=fake_store):
+            recalled = list_langmem_memories(
+                self.history_id,
+                query=full_query,
+                limit=3,
+            )
+
+        self.assertEqual(len(recalled), 1)
+        self.assertIn("github.com/example/helios-repro", recalled[0]["content"])
+        self.assertEqual(recalled[0]["score"], 0.44)
 
     def test_ignore_memory_proceeds_with_empty_long_term_context(self):
         conversation = create_conversation(self.history_id)

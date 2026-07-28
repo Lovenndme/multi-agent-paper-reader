@@ -174,16 +174,48 @@ def list_langmem_memories(
     if limit <= 0:
         return []
     store = get_langmem_store()
-    results = store.search(
-        memory_namespace(history_id),
-        query=query.strip() if query and query.strip() else None,
-        limit=min(max(1, limit), 20),
-    )
+    namespace = memory_namespace(history_id)
+    clean_query = query.strip() if query and query.strip() else None
+    bounded_limit = min(max(1, limit), 20)
     threshold = _recall_threshold() if min_score is None else float(min_score)
+    if clean_query:
+        candidates: dict[str, Any] = {}
+        primary = store.search(
+            namespace,
+            query=clean_query,
+            limit=bounded_limit,
+        )
+        for item in primary:
+            if item.score is None or float(item.score) >= threshold:
+                candidates[item.key] = item
+
+        # A compound user turn can contain several unrelated questions. Its single
+        # pooled embedding dilutes each intent, so probe each question clause and
+        # keep only the best memory per clause under a slightly relaxed threshold.
+        # Single-question behavior retains the stricter global threshold.
+        clauses = _memory_query_clauses(clean_query)
+        clause_threshold = threshold if len(clauses) <= 1 else max(-1.0, threshold - 0.15)
+        if len(clauses) > 1:
+            for clause in clauses[:6]:
+                for item in store.search(namespace, query=clause, limit=1):
+                    if item.score is not None and float(item.score) < clause_threshold:
+                        continue
+                    existing = candidates.get(item.key)
+                    if (
+                        existing is None
+                        or float(item.score or 0.0) > float(existing.score or 0.0)
+                    ):
+                        candidates[item.key] = item
+        results = sorted(
+            candidates.values(),
+            key=lambda item: float(item.score or 0.0),
+            reverse=True,
+        )[:bounded_limit]
+    else:
+        results = store.search(namespace, query=None, limit=bounded_limit)
+
     output: list[dict[str, Any]] = []
     for item in results:
-        if query and item.score is not None and float(item.score) < threshold:
-            continue
         parsed = _coerce_memory_value(item.value)
         if parsed is None:
             continue
@@ -202,6 +234,21 @@ def list_langmem_memories(
             }
         )
     return output
+
+
+def _memory_query_clauses(query: str) -> list[str]:
+    """Extract bounded question clauses for compound-query memory recall."""
+    clauses: list[str] = []
+    for match in re.finditer(r"([^?？\n]{3,}[?？])", query):
+        clause = re.sub(
+            r"^\s*(?:[-*]\s*)?(?:[A-Za-z]\d{2,}\s*:\s*)?",
+            "",
+            match.group(1),
+        ).strip()
+        if not clause or clause in clauses:
+            continue
+        clauses.append(clause[:400])
+    return clauses
 
 
 def delete_paper_memories(history_id: str) -> None:

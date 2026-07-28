@@ -24,6 +24,7 @@ from core.chat import (
     store_analysis_session,
 )
 from core.evidence import EvidenceSnippet
+from core.chat_memory import PromptMemory
 
 
 class TestPaperChat(unittest.TestCase):
@@ -323,6 +324,52 @@ class TestPaperChat(unittest.TestCase):
         self.assertLessEqual(measured, prompt.stats.token_budget)
         self.assertEqual(prompt.stats.estimated_input_tokens, measured)
         self.assertLess(prompt.stats.recent_messages, 20)
+
+    def test_dynamic_budget_reserves_recalled_memory_before_large_recent_history(self):
+        recalled_code = "MEMORY-7319"
+        recent_messages = tuple(
+            {
+                "id": f"message-{index}",
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": ("很长的近期消息" * 1_000)[:8_000],
+                "quote": None,
+                "sequence": index + 1,
+                "created_at": "",
+            }
+            for index in range(12)
+        )
+        prompt_memory = PromptMemory(
+            recent_messages=recent_messages,
+            recalled_messages=(),
+            memory_index="",
+            memory_summary="",
+            recalled_topics=(
+                {
+                    "topic": "复现实验随机种子",
+                    "content": f"固定随机种子代号是 {recalled_code}。",
+                    "source_start_sequence": 0,
+                    "source_end_sequence": 0,
+                },
+            ),
+            total_messages=20,
+            memory_message_count=20,
+        )
+        request = PaperChatRequest(
+            question="复现实验随机种子代号是什么？",
+            context={"paper": {"title": "Memory Budget Test"}},
+        )
+
+        with (
+            patch("core.chat._load_prompt_memory", return_value=prompt_memory),
+            patch.dict(os.environ, {"CHAT_INPUT_TOKEN_BUDGET": "8000"}),
+        ):
+            prompt = build_chat_prompt(request)
+
+        measured = sum(estimate_chat_tokens(message.content) for message in prompt.messages)
+        self.assertLessEqual(measured, prompt.stats.token_budget)
+        self.assertIn("<recalled_topic_memory>", prompt.messages[0].content)
+        self.assertIn(recalled_code, prompt.messages[0].content)
+        self.assertGreater(prompt.stats.recent_messages, 0)
 
 
 if __name__ == "__main__":

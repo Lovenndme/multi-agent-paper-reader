@@ -15,7 +15,7 @@ A local AI workspace for reading academic papers. Upload a PDF and the app combi
 - **Grounded paper chat** — follow-up answers are constrained by retrieved sections, pages, and evidence.
 - **Multi-paper comparison** — compare methods, experiments, conclusions, and research gaps across 2–4 saved papers.
 - **Explainable assessment** — separates paper novelty from analysis reliability and keeps the scoring evidence and warnings.
-- **Local history and memory** — papers, analyses, conversations, and long-term memory stay under `.paper-reader/`.
+- **Local history and memory** — papers, analyses, conversations, and long-term memory stay under `.paper-reader/`; compound questions use bounded clause-level recall, and matched durable memory receives a protected prompt budget.
 - **Flexible model routing** — supports GLM, DeepSeek, OpenAI, Qwen, Doubao, Anthropic, Kimi, custom relays, and a local Codex subscription.
 
 ## Interface preview

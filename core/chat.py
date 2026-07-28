@@ -419,6 +419,19 @@ def build_chat_prompt(
     )
     sections.append(evidence_section)
 
+    # Relevant durable memory must not be starved by oversized recent turns.
+    # Keep the cap proportional at normal windows while reserving only a small,
+    # bounded share in the 8K pressure profile.
+    topic_text = _format_topic_memories(prompt_memory.recalled_topics)
+    if topic_text:
+        topic_section, remaining = _take_prompt_section(
+            "recalled_topic_memory",
+            topic_text,
+            remaining,
+            max_tokens=min(5_000, max(800, token_budget // 12)),
+        )
+        sections.append(topic_section)
+
     fitted_recent, remaining = _fit_recent_turns(recent_turns, remaining, max_tokens=14_000)
     context_json = compact_analysis_context(analysis_context, max_tokens=min(8_000, remaining))
     analysis_section, remaining = _take_prompt_section(
@@ -446,16 +459,6 @@ def build_chat_prompt(
             max_tokens=3_500,
         )
         sections.append(session_section)
-
-    topic_text = _format_topic_memories(prompt_memory.recalled_topics)
-    if topic_text:
-        topic_section, remaining = _take_prompt_section(
-            "recalled_topic_memory",
-            topic_text,
-            remaining,
-            max_tokens=5_000,
-        )
-        sections.append(topic_section)
 
     recalled_text = _format_recalled_messages(prompt_memory.recalled_messages)
     if recalled_text:
