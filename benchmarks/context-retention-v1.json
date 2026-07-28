@@ -1,0 +1,179 @@
+{
+  "benchmark_id": "context-retention-v1",
+  "description": "Frozen long-conversation fact-retention benchmark for the paper follow-up prompt pipeline.",
+  "seed": 20260728,
+  "target_history_tokens": 110000,
+  "target_analysis_tokens": 20019,
+  "history_message_count": 20,
+  "input_budget_tokens": 8000,
+  "default_repeats": 3,
+  "facts": [
+    {
+      "id": "M01",
+      "channel": "memory",
+      "category": "user",
+      "message_index": 0,
+      "statement": "请长期记住：我的研究角色代号是 BAYES-PHD；以后询问研究角色时返回这个代号。",
+      "question": "用户的研究角色代号是什么？",
+      "answer": "BAYES-PHD",
+      "numeric": false
+    },
+    {
+      "id": "M02",
+      "channel": "memory",
+      "category": "feedback",
+      "message_index": 2,
+      "statement": "请长期记住：实验结果回答格式代号是 CONCLUSION-2E，含义是先给结论再给两条证据。",
+      "question": "实验结果回答格式代号是什么？",
+      "answer": "CONCLUSION-2E",
+      "numeric": false
+    },
+    {
+      "id": "M03",
+      "channel": "memory",
+      "category": "project",
+      "message_index": 4,
+      "statement": "请长期记住：当前复现实验的固定随机种子是 7319，这是无法从论文正文恢复的项目配置。",
+      "question": "当前复现实验的固定随机种子是多少？",
+      "answer": "7319",
+      "numeric": true
+    },
+    {
+      "id": "M04",
+      "channel": "memory",
+      "category": "reference",
+      "message_index": 6,
+      "statement": "请长期记住：复现项目的唯一参考仓库是 https://github.com/example/helios-repro 。",
+      "question": "复现项目的唯一参考仓库地址是什么？",
+      "answer": "https://github.com/example/helios-repro",
+      "numeric": false
+    },
+    {
+      "id": "M05",
+      "channel": "memory",
+      "category": "project",
+      "message_index": 8,
+      "statement": "请长期记住：复现项目的内部截止日期是 2026-11-18。",
+      "question": "复现项目的内部截止日期是什么？",
+      "answer": "2026-11-18",
+      "numeric": true
+    },
+    {
+      "id": "E01",
+      "channel": "evidence",
+      "evidence_id": "E101",
+      "section": "Dataset",
+      "statement": "The frozen evaluation dataset is identified by the exact code ORION-17.",
+      "question": "论文冻结评测数据集的代码是什么？",
+      "answer": "ORION-17",
+      "numeric": false
+    },
+    {
+      "id": "E02",
+      "channel": "evidence",
+      "evidence_id": "T102",
+      "section": "Results",
+      "statement": "The reported top-1 accuracy on ORION-17 is exactly 91.73%.",
+      "question": "论文报告的Top-1准确率是多少？",
+      "answer": "91.73%",
+      "numeric": true
+    },
+    {
+      "id": "E03",
+      "channel": "evidence",
+      "evidence_id": "E103",
+      "section": "Training",
+      "statement": "The training batch size used in the main experiment is exactly 64.",
+      "question": "论文主实验的训练Batch Size是多少？",
+      "answer": "64",
+      "numeric": true
+    },
+    {
+      "id": "E04",
+      "channel": "evidence",
+      "evidence_id": "E104",
+      "section": "Training",
+      "statement": "The initial learning rate is exactly 3e-4.",
+      "question": "论文使用的初始学习率是多少？",
+      "answer": "3e-4",
+      "numeric": true
+    },
+    {
+      "id": "E05",
+      "channel": "evidence",
+      "evidence_id": "T105",
+      "section": "Ablation",
+      "statement": "Removing the routing module decreases accuracy by exactly 4.2 percentage points.",
+      "question": "移除路由模块后准确率下降多少个百分点？",
+      "answer": "4.2",
+      "numeric": true
+    },
+    {
+      "id": "R01",
+      "channel": "recent",
+      "message_index": 18,
+      "statement": "本轮临时状态（不要写入长期记忆）：当前实验使用的GPU型号是 A100-80GB。",
+      "question": "当前实验使用的GPU型号是什么？",
+      "answer": "A100-80GB",
+      "numeric": false
+    },
+    {
+      "id": "R02",
+      "channel": "recent",
+      "message_index": 18,
+      "statement": "本轮临时状态（不要写入长期记忆）：当前异常工单编号是 INC-482。",
+      "question": "当前异常工单编号是什么？",
+      "answer": "INC-482",
+      "numeric": false
+    },
+    {
+      "id": "R03",
+      "channel": "recent",
+      "message_index": 18,
+      "statement": "本轮临时状态（不要写入长期记忆）：当前检查点是 epoch-37。",
+      "question": "当前检查点是什么？",
+      "answer": "epoch-37",
+      "numeric": true
+    },
+    {
+      "id": "R04",
+      "channel": "recent",
+      "message_index": 19,
+      "statement": "本轮临时状态（不要写入长期记忆）：当前活动分支是 exp/calibration-v2。",
+      "question": "当前活动分支是什么？",
+      "answer": "exp/calibration-v2",
+      "numeric": false
+    },
+    {
+      "id": "R05",
+      "channel": "recent",
+      "message_index": 19,
+      "statement": "本轮临时状态（不要写入长期记忆）：当前置信度阈值是 0.37。",
+      "question": "当前置信度阈值是多少？",
+      "answer": "0.37",
+      "numeric": true
+    }
+  ],
+  "groups": [
+    {
+      "id": "G01",
+      "fact_ids": ["M01", "E01", "R01"]
+    },
+    {
+      "id": "G02",
+      "fact_ids": ["M02", "E02", "R02"]
+    },
+    {
+      "id": "G03",
+      "fact_ids": ["M03", "E03", "R03"]
+    },
+    {
+      "id": "G04",
+      "fact_ids": ["M04", "E04", "R04"]
+    },
+    {
+      "id": "G05",
+      "fact_ids": ["M05", "E05", "R05"]
+    }
+  ]
+}

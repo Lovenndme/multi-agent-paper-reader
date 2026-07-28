@@ -63,6 +63,9 @@
 - `core/langmem_store.py`：结构化 schema、SQLite `BaseStore` 适配和兼容迁移。
 - `core/semantic_search.py`：本地 Embedding 适配和缓存。
 - `scripts/evaluate_memory.py`：真实模型行为、召回、重启、压力及回答 A/B 评测。
+- `tools/run_context_retention_benchmark.py`：约 13 万 Token 候选上下文与
+  8K 治理链路的冻结事实保留 A/B，协议和结果见
+  `docs/context-retention-benchmark.md`。
 
 ## 上游边界
 
